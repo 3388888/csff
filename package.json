@@ -9,7 +9,8 @@
   "scripts": {
     "start": "electron .",
     "analyze": "node analyze.js",
-    "dist": "electron-builder --win portable",
+    "dist": "electron-builder",
+    "dist:portable": "electron-builder --win portable",
     "dist:dir": "electron-builder --dir"
   },
   "dependencies": {
@@ -30,6 +31,7 @@
       "main.js", "preload.js", "parser.js", "parse-worker.js", "settings.js", "vdm.js",
       "renderer/**/*", "assets/**/*", "maps/**/*"
     ],
-    "win": { "target": "portable" }
+    "win": { "target": "nsis" },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "perMachine": false, "createDesktopShortcut": true }
   }
 }
