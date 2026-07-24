@@ -1,0 +1,35 @@
+{
+  "name": "csgo-demo-highlights",
+  "version": "1.0.0",
+  "description": "Finds and ranks cool kills, clutches, and movement in CS:GO demos, with a 2D preview and one-click 'watch in CS:GO'.",
+  "main": "main.js",
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "scripts": {
+    "start": "electron .",
+    "analyze": "node analyze.js",
+    "dist": "electron-builder --win portable",
+    "dist:dir": "electron-builder --dir"
+  },
+  "dependencies": {
+    "demofile": "^2.10.0",
+    "seek-bzip": "^2.0.0"
+  },
+  "devDependencies": {
+    "electron": "^43.2.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.demohighlights.app",
+    "productName": "CSGO Demo Highlights",
+    "asar": false,
+    "compression": "normal",
+    "directories": { "output": "dist" },
+    "files": [
+      "main.js", "preload.js", "parser.js", "parse-worker.js", "settings.js", "vdm.js",
+      "renderer/**/*", "assets/**/*", "maps/**/*"
+    ],
+    "win": { "target": "portable" }
+  }
+}
