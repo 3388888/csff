@@ -28,15 +28,43 @@ const DEFAULTS = {
 // default point weights per tag (user-tunable via cfg.weights)
 const TAGW = {
   ace: 100, quad: 70, triple: 45, clutch: 85,
-  jump_noscope: 90, noscope: 40, bhop: 55, airborne: 25, boosted: 30,
-  flick_hs: 45, flick: 30, long_range: 25, wallbang: 30, airshot: 35, collateral: 40,
-  smoke_streak: 20, blind_streak: 25, rng: 60, off_height: 55, outnumbered: 35,
-  bhop_run: 40, fast: 15, long_chain: 25, edgebug: 55, jumpbug: 45, into_kill: 45,
+  jump_noscope: 90, noscope: 65, jumpshot: 55, bhop: 50, airborne: 15, boosted: 12,
+  flick_hs: 55, flick: 35, spin: 55, long_range: 25, wallbang: 45, airshot: 22, collateral: 45,
+  smoke_kill: 30, blind_kill: 40, smoke_streak: 20, blind_streak: 25, rng: 55, off_height: 45, outnumbered: 35,
+  bhop_run: 22, fast: 12, long_chain: 20, edgebug: 55, jumpbug: 45, into_kill: 45,
 };
 const SNIPERS = new Set(["awp", "ssg08", "scar20", "g3sg1"]);
+// weapon categories + cssff-derived frag thresholds (source units / seconds)
+const WPCAT = { ak47: "Rifles", m4a1: "Rifles", m4a1_silencer: "Rifles", sg556: "Rifles", aug: "Rifles", famas: "Rifles", galilar: "Rifles",
+  awp: "Snipers", g3sg1: "AutoSnipers", scar20: "AutoSnipers", ssg08: "Scout",
+  glock: "Pistols", hkp2000: "Pistols", p2000: "Pistols", usp_silencer: "Pistols", p250: "Pistols", tec9: "Pistols", cz75a: "Pistols", fiveseven: "Pistols", elite: "Pistols",
+  deagle: "Deagle", revolver: "Deagle",
+  mp9: "Smgs", mac10: "Smgs", mp7: "Smgs", ump45: "Smgs", p90: "Smgs", bizon: "Smgs", mp5sd: "Smgs",
+  nova: "Shotguns", xm1014: "Shotguns", mag7: "Shotguns", sawedoff: "Shotguns" };
+const wcat = (w) => WPCAT[(w || "").toLowerCase()] || "Rifles";
+const FRAG = {
+  noscopeDist: { Snipers: 2000, Scout: 8000, AutoSnipers: 2000 }, noscopeHsMod: { Snipers: 0.5, Scout: 0.375, AutoSnipers: 0.666 },
+  jumpDist: { default: 800, Snipers: 0, Scout: 1000, AutoSnipers: 2000 }, jumpHsMod: 0.65,
+  flickDist: { default: 120, Rifles: 160 },
+  multiMax: { 3: { default: 2, Rifles: 0.8, Snipers: 4, AutoSnipers: 1.6, Pistols: 1.2, Deagle: 3, Shotguns: 3, Knife: 4 }, 4: { default: 6.5, Snipers: 10, Shotguns: 15, Knife: 15 }, 5: { default: 13, Snipers: 15, Scout: 15, Shotguns: 15, Knife: 60 } },
+  multiExtra: { 3: 0.5, 4: 1, 5: 3 }, // per special kill in the burst
+};
+const SPECIAL_TAGS = new Set(["noscope", "jump_noscope", "jumpshot", "flick", "flick_hs", "wallbang", "smoke_kill", "blind_kill", "spin"]);
 const WBASE = { awp: .95, ssg08: .92, scar20: .85, g3sg1: .85, ak47: .72, m4a1: .75, m4a1_silencer: .78, sg556: .7, aug: .74, famas: .66, galilar: .64,
   deagle: .6, revolver: .55, glock: .66, hkp2000: .7, usp_silencer: .72, p250: .68, tec9: .62, cz75a: .6, fiveseven: .7, elite: .58,
   mp9: .66, mac10: .6, mp7: .66, ump45: .66, p90: .64, bizon: .62, mp5sd: .68, nova: .5, xm1014: .48, mag7: .5, sawedoff: .45, m249: .55, negev: .5 };
+
+// single-shot hit-chance (0..1). No-scopes are EASY up close, hard far — distance
+// is what makes them cool. Recomputed in classify so it's tunable without re-decode.
+function computeHitChance(k) {
+  const t = k.telemetry, w = k.weapon, distM = k.distM || 0, sniper = SNIPERS.has(w);
+  let c;
+  if (sniper && k.noscope) c = 0.92 - distM * 0.021;            // 5m≈0.81, 25m≈0.4, 42m≈0.03
+  else { c = WBASE[w] != null ? WBASE[w] : 0.6; if (distM) c *= Math.max(0.2, 1 - Math.max(0, distM - 15) / 60); }
+  if (t.airborneAtKill) c *= (sniper && k.noscope ? 0.55 : 0.16);
+  else if (t.speedAtKill > 130) c *= (1 - Math.min((t.speedAtKill - 130) / 250, 0.6));
+  return Math.max(0.02, Math.min(0.98, c));
+}
 
 const angleDiff = (a, b) => ((((a - b) % 360) + 540) % 360) - 180;
 const hyp = (x, y) => Math.hypot(x || 0, y || 0);
@@ -264,11 +292,44 @@ function parseRaw(demPath, opts = {}) {
 function classify(raw, cfg = {}) {
   cfg = { ...DEFAULTS, ...cfg };
   const W = { ...TAGW, ...(cfg.weights || {}) };
+  // effective frag config (cssff-style), overridable from Settings via cfg.frag
+  const fc = cfg.frag || {};
+  const F = {
+    noscopeDist: { Snipers: fc.noscopeAwp ?? FRAG.noscopeDist.Snipers, Scout: fc.noscopeScout ?? FRAG.noscopeDist.Scout, AutoSnipers: fc.noscopeAuto ?? FRAG.noscopeDist.AutoSnipers },
+    noscopeHsMod: FRAG.noscopeHsMod,
+    jumpDist: { default: fc.jumpDist ?? FRAG.jumpDist.default, Snipers: fc.jumpSnipers ?? FRAG.jumpDist.Snipers, Scout: FRAG.jumpDist.Scout, AutoSnipers: FRAG.jumpDist.AutoSnipers },
+    jumpHsMod: FRAG.jumpHsMod,
+    flickDist: { default: fc.flickDist ?? FRAG.flickDist.default, Rifles: FRAG.flickDist.Rifles },
+    multiMax: {
+      3: { ...FRAG.multiMax[3], default: fc.multi3 ?? FRAG.multiMax[3].default, Rifles: fc.multi3Rifles ?? FRAG.multiMax[3].Rifles, Snipers: fc.multi3Snipers ?? FRAG.multiMax[3].Snipers },
+      4: { ...FRAG.multiMax[4], default: fc.multi4 ?? FRAG.multiMax[4].default },
+      5: { ...FRAG.multiMax[5], default: fc.multi5 ?? FRAG.multiMax[5].default },
+    },
+    multiExtra: FRAG.multiExtra,
+  };
   const tickrate = raw.tickrate, rounds = raw.score.rounds;
   const prerollTicks = Math.round(tickrate * cfg.prerollSec);
   const postTicks = Math.round(tickrate * cfg.postSec);
   const previewStep = raw.previewStep || Math.max(1, Math.round(tickrate / (cfg.previewFps || 32)));
   const gapTicks = Math.round((cfg.multikillGapSec ?? 8) * tickrate);
+
+  // position/yaw lookup per player from the timeline (for AFK-victim + spin detection)
+  const posByUid = {};
+  for (const f of raw.timeline) for (const q of f.p) (posByUid[q[0]] = posByUid[q[0]] || []).push({ t: f.t, x: q[1], y: q[2], yaw: q[3] });
+  function movedInWindow(uid, a, b) { const arr = posByUid[uid]; if (!arr) return 999; let d = 0, prev = null; for (const p of arr) { if (p.t < a || p.t > b) continue; if (prev) d += Math.hypot(p.x - prev.x, p.y - prev.y); prev = p; } return prev ? d : 999; }
+  function spinInWindow(uid, a, b) { const arr = posByUid[uid]; if (!arr) return 0; let s = 0, prev = null; for (const p of arr) { if (p.t < a || p.t > b || p.yaw == null) continue; if (prev != null) s += Math.abs(angleDiff(p.yaw, prev)); prev = p.yaw; } return Math.round(s); }
+
+  // rounds where a victim died 2+ times = warmup / DM refragging (less impressive)
+  const rvd = {}; for (const k of raw.kills) { const v = k.victim.steamId || k.victim.name; ((rvd[k.round] = rvd[k.round] || {})[v] = (rvd[k.round][v] || 0) + 1); }
+  const refragRound = {}; for (const r in rvd) refragRound[r] = Object.values(rvd[r]).some((c) => c >= 2);
+
+  // enrich every kill (recompute hit-chance with the new model; flag afk/spin/warmup)
+  for (const k of raw.kills) {
+    k.hitChance = +computeHitChance(k).toFixed(3);
+    k._afkMoved = movedInWindow(k.victim.uid, k.killTick - tickrate * 3, k.killTick);
+    k._spin = spinInWindow(k.attacker.uid, k.killTick - tickrate, k.killTick);
+    k._refrag = !!refragRound[k.round];
+  }
 
   function sliceFrames(a, b) {
     const out = [];
@@ -279,23 +340,29 @@ function classify(raw, cfg = {}) {
     return out;
   }
   function trickTags(k, roundTotal) {
-    const t = k.telemetry, tags = [];
-    if (k.noscope && t.airborneAtKill) tags.push("jump_noscope"); else if (k.noscope) tags.push("noscope");
-    if (t.airborneAtKill && t.speedAtKill >= cfg.bhopMinSpeed) tags.push("bhop");
-    else if (t.airborneAtKill && t.maxAirStreakTicks >= Math.round(tickrate * 0.35)) tags.push("airborne");
-    if (t.maxVz >= cfg.boostVz && t.airborneAtKill) tags.push("boosted");
-    if (t.flickDeg >= cfg.flickMinDeg) tags.push(k.headshot ? "flick_hs" : "flick");
-    const scopedSniper = SNIPERS.has(k.weapon) && !k.noscope;
-    if (k.distM != null && k.distM >= cfg.longRangeM && !scopedSniper) tags.push("long_range");
-    if (k.penetrated > 0) tags.push("wallbang");
+    const t = k.telemetry, tags = [], cat = wcat(k.weapon), sniper = SNIPERS.has(k.weapon), d = k.distUnits || 0;
+    // NO-SCOPE (snipers): must be at real distance (cssff). HS lowers the bar.
+    if (k.noscope && sniper) {
+      const minD = (F.noscopeDist[cat] ?? 2000) * (k.headshot ? (F.noscopeHsMod[cat] ?? 0.5) : 1);
+      if (d >= minD) tags.push(t.airborneAtKill ? "jump_noscope" : "noscope");
+    }
+    // JUMPSHOT: airborne kill at distance (snipers any distance). Not double-counted with jump_noscope.
+    if (t.airborneAtKill && !(k.noscope && sniper)) {
+      const minJ = (F.jumpDist[cat] ?? F.jumpDist.default) * (k.headshot ? F.jumpHsMod : 1);
+      if (d >= minJ) tags.push("jumpshot");
+    }
+    // FLICK: fast wide turn onto a target at distance
+    if (t.flickDeg >= cfg.flickMinDeg && d >= (F.flickDist[cat] ?? F.flickDist.default)) tags.push(k.headshot ? "flick_hs" : "flick");
+    if (k._spin >= 300) tags.push("spin");
+    if (k.penetrated > 0 && k.headshot) tags.push("wallbang"); // HS wallbangs only (cssff)
+    if (k.smoke) tags.push("smoke_kill");
+    if (k.blind) tags.push("blind_kill");
     if (k.airshot) tags.push("airshot");
-    if (k.smoke && roundTotal >= cfg.streakForSmokeBlind) tags.push("smoke_streak");
-    if (k.blind && roundTotal >= cfg.streakForSmokeBlind) tags.push("blind_streak");
-    const single = k.shotsBeforeKill <= 1;
-    if (k.hitChance != null && k.hitChance <= cfg.rngMaxChance && single) tags.push("rng");
-    if (t.airborneAtKill && t.vzAtKill < -180 && (k.noscope || single)) tags.push("off_height");
-    k._nearby = (k.enemyDists || []).filter((d) => d <= cfg.nearbyRadius).length;
+    if (k.distM != null && k.distM >= cfg.longRangeM && !(sniper && !k.noscope)) tags.push("long_range");
+    if (t.airborneAtKill && t.vzAtKill < -180 && k.noscope) tags.push("off_height"); // noscope while dropping off height
+    k._nearby = (k.enemyDists || []).filter((dd) => dd <= cfg.nearbyRadius).length;
     if (k._nearby >= 3 && k.teamAlive <= k.enemyAliveAfter) tags.push("outnumbered");
+    k._special = tags.some((tg) => SPECIAL_TAGS.has(tg));
     return tags;
   }
 
@@ -311,8 +378,13 @@ function classify(raw, cfg = {}) {
     for (const k of ks) if (k.hitChance != null && k.hitChance < 0.35) score += Math.round((1 - k.hitChance) * 40) + (k.shotsBeforeKill <= 1 ? 10 : 0);
     const risky = tags.some((t) => ["rng", "off_height", "outnumbered", "jump_noscope"].includes(t));
     if (risky && raw.roundWinners[first.round] && raw.roundWinners[first.round] !== first.attacker.team) score += 25;
+    // penalties from the user's feedback: AFK victims, and warmup/DM refrag rounds
+    if (ks.every((k) => k._afkMoved < 120)) score *= 0.25;   // killed a barely-moving (AFK) player
+    if (ks.every((k) => k._refrag)) score *= 0.55;           // warmup / deathmatch refragging
+    score = Math.round(score);
     return {
-      id: hid++, round: first.round, attacker: first.attacker, tags, coolScore: Math.round(score), clutchX: extra.clutchX || null,
+      id: hid++, round: first.round, attacker: first.attacker, tags, coolScore: score, clutchX: extra.clutchX || null,
+      afk: ks.every((k) => k._afkMoved < 120), warmup: ks.every((k) => k._refrag), spin: Math.max(...ks.map((k) => k._spin || 0)),
       watchTick, killTick: first.killTick, endTick,
       kills: ks.map((k) => ({ killTick: k.killTick, weapon: k.weapon, headshot: k.headshot, penetrated: k.penetrated,
         noscope: k.noscope, smoke: k.smoke, blind: k.blind, airshot: k.airshot, distM: k.distM, distUnits: k.distUnits,
@@ -330,14 +402,32 @@ function classify(raw, cfg = {}) {
     const used = new Set();
     const solo = grp.filter((k) => k.teamAlive === 1);
     if (solo.length >= 2 && solo[solo.length - 1].enemyAliveAfter === 0) {
-      const x = solo[0].enemyAliveAfter + 1; const tagSet = new Set(["clutch"]); const m = multiTag(solo.length); if (m) tagSet.add(m);
+      const x = solo[0].enemyAliveAfter + 1; const tagSet = new Set(["clutch"]); // a clutch is a clutch (1vX) regardless of timing
       for (const k of solo) { for (const t of k._tags) tagSet.add(t); used.add(k); }
       highlights.push(makeHighlight(solo, [...tagSet], { clutchX: x }));
     }
     const rest = grp.filter((k) => !used.has(k));
-    let burst = [];
-    const flush = () => { if (burst.length >= 3) { const tagSet = new Set([multiTag(burst.length)]); for (const k of burst) { for (const t of k._tags) tagSet.add(t); used.add(k); } highlights.push(makeHighlight(burst.slice(), [...tagSet])); } burst = []; };
-    for (const k of rest) { if (burst.length && k.killTick - burst[burst.length - 1].killTick > gapTicks) flush(); burst.push(k); }
+    // group into candidate bursts (kills chained within a loose link), then a burst only
+    // "ticks" as a 3k/4k/5k if its span fits the tight, weapon-specific max time (+ special extends)
+    let chain = [];
+    const flush = () => {
+      if (chain.length >= 3) {
+        const n = Math.min(chain.length, 5);
+        const cat = chain.map((k) => wcat(k.weapon)).reduce((a, b) => ((F.multiMax[n][b] ?? F.multiMax[n].default) > (F.multiMax[n][a] ?? F.multiMax[n].default) ? b : a));
+        const specials = chain.filter((k) => k._special).length;
+        const maxT = (F.multiMax[n][cat] ?? F.multiMax[n].default) + specials * (F.multiExtra[n] || 0);
+        const span = (chain[chain.length - 1].killTick - chain[0].killTick) / tickrate;
+        const hs = chain.filter((k) => k.headshot).length;
+        const minHs = (cat === "Snipers" || cat === "Scout" || cat === "AutoSnipers") ? 0 : (n === 3 ? 2 : 0);
+        if (span <= maxT && (hs >= minHs || specials > 0)) { // needs HS unless it contains a special kill
+          const tagSet = new Set([multiTag(chain.length)]);
+          for (const k of chain) { for (const t of k._tags) tagSet.add(t); used.add(k); }
+          highlights.push(makeHighlight(chain.slice(), [...tagSet]));
+        }
+      }
+      chain = [];
+    };
+    for (const k of rest) { if (chain.length && (k.killTick - chain[chain.length - 1].killTick) / tickrate > 5) flush(); chain.push(k); }
     flush();
     const byTick = new Map();
     for (const k of grp) { if (used.has(k)) continue; if (!byTick.has(k.killTick)) byTick.set(k.killTick, []); byTick.get(k.killTick).push(k); }
@@ -345,15 +435,18 @@ function classify(raw, cfg = {}) {
     for (const k of grp) { if (used.has(k)) continue; if (k._tags.length) highlights.push(makeHighlight([k], k._tags)); }
   }
 
-  // movement (bhop) runs — apply the tunable thresholds here
+  // movement (bhop) runs — ONLY keep a run that ends in a kill (a pure run isn't a frag)
   for (const run of raw.movementRuns) {
     if (run.jumps < cfg.runMinJumps || run.maxSpeed < cfg.runMinPeak || run.airPct < cfg.runMinAir) continue;
-    const tags = ["bhop_run"]; if (run.maxSpeed >= 400) tags.push("fast"); if (run.jumps >= 12) tags.push("long_chain");
+    const fk = raw.kills.find((k) => (k.attacker.steamId === run.steamId || k.attacker.name === run.name) && k.killTick >= run.startTick && k.killTick <= run.endTick + tickrate);
+    if (!fk) continue; // no kill during/after the run -> skip entirely
+    const tags = ["bhop_run", "into_kill"]; if (run.maxSpeed >= 400) tags.push("fast"); if (run.jumps >= 12) tags.push("long_chain");
     let score = 0; for (const t of tags) score += W[t] || 10;
     score += Math.round(Math.min(run.maxSpeed, 500) - 250 + run.jumps * 6 + run.durSec * 2);
-    highlights.push({ id: hid++, type: "movement", round: 0, attacker: { name: run.name, steamId: run.steamId, team: run.team, uid: run.uid },
-      tags, coolScore: score, clutchX: null, watchTick: Math.max(0, run.startTick - prerollTicks), killTick: run.startTick, endTick: run.endTick,
-      movement: { maxSpeed: run.maxSpeed, avgSpeed: run.avgSpeed, jumps: run.jumps, airPct: run.airPct, distUnits: run.distUnits, durSec: run.durSec }, kills: [] });
+    highlights.push({ id: hid++, type: "movement", round: fk ? fk.round : 0, attacker: { name: run.name, steamId: run.steamId, team: run.team, uid: run.uid },
+      tags, coolScore: score, clutchX: null, watchTick: Math.max(0, run.startTick - prerollTicks), killTick: run.startTick, endTick: (fk ? fk.killTick : run.endTick),
+      movement: { maxSpeed: run.maxSpeed, avgSpeed: run.avgSpeed, jumps: run.jumps, airPct: run.airPct, distUnits: run.distUnits, durSec: run.durSec, killAfter: !!fk },
+      kills: fk ? [{ killTick: fk.killTick, weapon: fk.weapon, headshot: fk.headshot, victim: fk.victim, telemetry: fk.telemetry, shot: fk.shot, tags: [] }] : [] });
   }
 
   // edgebug / jumpbug — ship only if enough fall damage saved OR a kill right after

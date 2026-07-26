@@ -36,7 +36,7 @@
           </div>
           <div class="col-right">
             <h2>Cool kills <span id="coolCount" class="muted"></span>
-              <button id="btnVdm" class="mini" title="Write a .vdm next to the demo so CS:GO jumps through all these kills">Export highlight VDM</button>
+              <button id="btnVdm" class="mini" title="Write a .vdm next to the demo so CS:GO jumps through all these kills">Export VDM</button>
             </h2>
             <div class="cool-filter">
               <input id="coolSearch" type="text" placeholder="filter by player (killer or victim)…" />
@@ -85,6 +85,8 @@
       <div class="row"><input id="setCsgo" type="text" placeholder="…\ClassicCounter\csgo.exe" /><button id="pickCsgo" class="mini">Browse</button></div>
       <label>HLAE executable <small>(optional)</small></label>
       <div class="row"><input id="setHlae" type="text" placeholder="…\HLAE\hlae.exe" /><button id="pickHlae" class="mini">Browse</button></div>
+      <label>CS:S exe <small>(for “Open in CS:S”)</small></label>
+      <div class="row"><input id="setCss" type="text" placeholder="…\Counter-Strike Source\hl2.exe" /><button id="pickCss" class="mini">Browse</button></div>
       <label>Default demos folder</label>
       <div class="row"><input id="setDemos" type="text" /><button id="pickDemosDir" class="mini">Browse</button></div>
       <div class="row2">
@@ -106,6 +108,24 @@
         <div><label>Outnumbered radius</label><input id="setNearby" type="number" step="100" min="100" /></div>
         <div><label>Edgebug min dmg</label><input id="setEdge" type="number" step="5" min="0" /></div>
         <div><label>Max preview (sec)</label><input id="setMaxPrev" type="number" step="5" min="5" /></div>
+      </div>
+      <label style="margin-top:12px">Frag rules <small>— cssff-style distances (units) & multikill times (sec)</small></label>
+      <div class="row2">
+        <div><label>AWP noscope dist</label><input id="fNsAwp" type="number" step="100" /></div>
+        <div><label>Scout noscope dist</label><input id="fNsScout" type="number" step="100" /></div>
+        <div><label>Auto noscope dist</label><input id="fNsAuto" type="number" step="100" /></div>
+      </div>
+      <div class="row2">
+        <div><label>Jumpshot dist</label><input id="fJump" type="number" step="100" /></div>
+        <div><label>Sniper jumpshot dist</label><input id="fJumpSn" type="number" step="100" /></div>
+        <div><label>Flick min dist</label><input id="fFlick" type="number" step="20" /></div>
+      </div>
+      <div class="row2">
+        <div><label>3k max sec</label><input id="fM3" type="number" step="0.1" /></div>
+        <div><label>3k rifle sec</label><input id="fM3R" type="number" step="0.1" /></div>
+        <div><label>3k sniper sec</label><input id="fM3S" type="number" step="0.5" /></div>
+        <div><label>4k max sec</label><input id="fM4" type="number" step="0.5" /></div>
+        <div><label>5k max sec</label><input id="fM5" type="number" step="0.5" /></div>
       </div>
       <label>Show these categories <button id="catAll" class="mini ghost" type="button">all</button> <button id="catNone" class="mini ghost" type="button">none</button></label>
       <div id="catToggles" class="cat-toggles"></div>

@@ -20,6 +20,8 @@ const DEFAULTS = {
   edgebugMinDmg: 20,    // min fall damage an edgebug must save (unless it leads to a kill)
   maxPreviewSec: 25,    // cap movement preview length
   weights: {},          // per-tag point overrides for scoring (empty = defaults)
+  cssExe: "",           // path to css hl2.exe / launcher for "Open in CS:S"
+  frag: {},             // cssff-style frag rule overrides (noscope distance, multikill times, ...)
   deleteBz2: true,      // auto-delete the .bz2 after extracting (avoids duplicate entries)
   soloView: false,      // preview shows only the highlighted player
   disabledCats: [],     // category tags the user has hidden

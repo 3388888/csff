@@ -5,6 +5,8 @@ const { fork, spawn } = require("child_process");
 const settings = require("./settings");
 const { writeVdmForDemo } = require("./vdm");
 
+app.setName("CSGO Demo Highlights"); // share cache/ratings/settings between dev run and installed build
+
 let win;
 
 function createWindow() {
@@ -22,6 +24,10 @@ app.whenReady().then(() => {
   settings.init(app.getPath("userData"));
   createWindow();
   app.on("activate", () => { if (BrowserWindow.getAllWindows().length === 0) createWindow(); });
+  // check GitHub Releases for a newer version and install it on next quit (packaged app only)
+  if (app.isPackaged) {
+    try { const { autoUpdater } = require("electron-updater"); autoUpdater.autoDownload = true; autoUpdater.checkForUpdatesAndNotify(); } catch {}
+  }
 });
 app.on("window-all-closed", () => { if (process.platform !== "darwin") app.quit(); });
 
@@ -91,7 +97,8 @@ ipcMain.handle("demo:parse", (e, demoPath, opts) => new Promise((resolve, reject
     clearTimeout(timer); child.kill(); m.ok ? resolve(m.result) : reject(new Error(m.error));
   });
   child.on("error", (err) => { clearTimeout(timer); reject(err); });
-  child.send({ path: demoPath, opts, rawFile });
+  const cssffDir = app.isPackaged ? path.join(process.resourcesPath, "cssff") : path.join(__dirname, "vendor", "cssff");
+  child.send({ path: demoPath, opts, rawFile, cssffDir });
 }));
 
 // write a .vdm next to the demo covering all cool kills
@@ -102,6 +109,23 @@ ipcMain.handle("vdm:write", (e, demPath, coolKills, opts) => {
 
 ipcMain.handle("shell:showItem", (e, p) => { shell.showItemInFolder(p); });
 ipcMain.handle("weights:defaults", () => require("./parser").TAGW);
+
+// thumbs up/down ratings (to learn scoring weights from the user's taste)
+function ratingsFile() { return path.join(app.getPath("userData"), "ratings.json"); }
+ipcMain.handle("ratings:get", () => { try { return JSON.parse(fs.readFileSync(ratingsFile(), "utf8")); } catch { return {}; } });
+ipcMain.handle("ratings:set", (e, key, patch) => {
+  let all = {}; try { all = JSON.parse(fs.readFileSync(ratingsFile(), "utf8")); } catch {}
+  const next = { ...(all[key] || {}), ...patch };
+  const hasNote = next.note && String(next.note).trim();
+  if (!next.r && !hasNote) delete all[key]; else all[key] = next;
+  try { fs.writeFileSync(ratingsFile(), JSON.stringify(all)); } catch {}
+  return all;
+});
+// write a readable feedback file to the Desktop (to share) and reveal it
+ipcMain.handle("feedback:export", (e, text) => {
+  const p = path.join(app.getPath("desktop"), "demo-highlights-feedback.md");
+  try { fs.writeFileSync(p, text); shell.showItemInFolder(p); return p; } catch (err) { return null; }
+});
 
 // weapon + modifier SVG icons (read once)
 let iconCache = null;
@@ -131,14 +155,10 @@ ipcMain.handle("maps:radar", (e, map) => {
 });
 
 // launch CS:GO to play the demo (VDM auto-loads if same basename next to it)
-ipcMain.handle("csgo:launch", (e, demPath) => {
-  const s = settings.load();
-  if (!s.csgoExe || !fs.existsSync(s.csgoExe)) return { ok: false, error: "Set csgo.exe path in Settings first." };
-  // copy demo into csgo/replays if launching by name is needed; simplest: pass absolute path
-  const args = ["-novid", "-insecure", "+playdemo", demPath];
-  try {
-    const child = spawn(s.csgoExe, args, { detached: true, stdio: "ignore", cwd: path.dirname(s.csgoExe) });
-    child.unref();
-    return { ok: true };
-  } catch (err) { return { ok: false, error: err.message }; }
-});
+function launchGame(exe, demPath) {
+  if (!exe || !fs.existsSync(exe)) return { ok: false, error: "Set the game exe path in Settings first." };
+  try { const child = spawn(exe, ["-novid", "-insecure", "+playdemo", demPath], { detached: true, stdio: "ignore", cwd: path.dirname(exe) }); child.unref(); return { ok: true }; }
+  catch (err) { return { ok: false, error: err.message }; }
+}
+ipcMain.handle("csgo:launch", (e, demPath) => launchGame(settings.load().csgoExe, demPath));
+ipcMain.handle("css:launch", (e, demPath) => launchGame(settings.load().cssExe, demPath));

@@ -6,7 +6,8 @@ const TAG_LABEL = {
   bhop: "bhop", airborne: "airborne", boosted: "boosted", flick_hs: "flick HS", flick: "flick",
   long_range: "long range", wallbang: "wallbang", collateral: "collateral", airshot: "airshot",
   smoke_streak: "smoke (streak)", blind_streak: "blind (streak)",
-  rng: "RNG", off_height: "off height", outnumbered: "outnumbered",
+  rng: "RNG", off_height: "off height", outnumbered: "outnumbered", spin: "360 / spin",
+  jumpshot: "jumpshot", smoke_kill: "smoke kill", blind_kill: "flashed kill",
   bhop_run: "bhop run", fast: "fast", long_chain: "long chain", edgebug: "edgebug", jumpbug: "jumpbug", into_kill: "→ kill",
 };
 const HOT = new Set(["ace", "quad", "clutch", "jump_noscope", "collateral", "flick_hs", "bhop", "rng", "off_height"]);
@@ -17,7 +18,10 @@ const CAT_DEFS = [
   { key: "multikill", label: "Multikills", tags: ["ace", "quad", "triple"] },
   { key: "clutch", label: "Clutches", tags: ["clutch"] },
   { key: "noscope", label: "Noscopes", tags: ["noscope", "jump_noscope"] },
+  { key: "jumpshot", label: "Jumpshots", tags: ["jumpshot"] },
+  { key: "utilkill", label: "Smoke / flashed", tags: ["smoke_kill", "blind_kill"] },
   { key: "flick", label: "Flicks", tags: ["flick", "flick_hs"] },
+  { key: "spin", label: "360 / spin", tags: ["spin"] },
   { key: "bhop", label: "Bhop / air", tags: ["bhop", "airborne", "boosted"] },
   { key: "movement", label: "Movement runs", tags: ["bhop_run", "fast", "long_chain"] },
   { key: "tricks", label: "Edgebug / jumpbug", tags: ["edgebug", "jumpbug"] },
@@ -33,6 +37,9 @@ const tagToCat = {}; for (const c of CAT_DEFS) for (const t of c.tags) tagToCat[
 
 let current = null, settings = null, defaultWeights = {};
 const radarCache = {};
+// cssff-style frag rule defaults (mirror parser FRAG), shown in Settings
+const FRAG_DEF = { noscopeAwp: 2000, noscopeScout: 8000, noscopeAuto: 2000, jumpDist: 800, jumpSnipers: 0, flickDist: 120, multi3: 2, multi3Rifles: 0.8, multi3Snipers: 4, multi4: 6.5, multi5: 13 };
+
 
 // all tunables sent to the engine's classify step (instant, no re-decode)
 function classifyOpts() {
@@ -41,7 +48,7 @@ function classifyOpts() {
     prerollSec: s.prerollSec, longRangeM: s.longRangeM, flickMinDeg: s.flickMinDeg, bhopMinSpeed: s.bhopMinSpeed,
     multikillGapSec: s.multikillGapSec, rngMaxChance: s.rngMaxChance, runMinJumps: s.runMinJumps, runMinPeak: s.runMinPeak,
     runMinAir: s.runMinAir, nearbyRadius: s.nearbyRadius, edgebugMinDmg: s.edgebugMinDmg, maxPreviewSec: s.maxPreviewSec,
-    weights: s.weights || {}, deleteBz2: s.deleteBz2,
+    weights: s.weights || {}, frag: s.frag || {}, deleteBz2: s.deleteBz2,
   };
 }
 let parseProgress = { name: "", prefix: "" };
@@ -49,6 +56,7 @@ let parseProgress = { name: "", prefix: "" };
   settings = await window.api.getSettings();
   try { const ic = await window.api.getIcons(); if (ic) window.ICONS = ic; } catch {}
   try { defaultWeights = await window.api.getDefaultWeights() || {}; } catch {}
+
   window.api.onParseProgress(({ frac }) => { if (!scanning && $("#status").style.display !== "none") showProgress("Parsing " + parseProgress.name + " — " + Math.round(frac * 100) + "%", frac); });
   if (settings.demosDir) loadFolder(settings.demosDir);
   wire();
@@ -63,6 +71,7 @@ function wire() {
   $("#settingsSave").onclick = saveSettings;
   $("#pickCsgo").onclick = async () => { const p = await window.api.pickFile([{ name: "csgo.exe", extensions: ["exe"] }]); if (p) $("#setCsgo").value = p; };
   $("#pickHlae").onclick = async () => { const p = await window.api.pickFile([{ name: "exe", extensions: ["exe"] }]); if (p) $("#setHlae").value = p; };
+  $("#pickCss").onclick = async () => { const p = await window.api.pickFile([{ name: "exe", extensions: ["exe"] }]); if (p) $("#setCss").value = p; };
   $("#pickDemosDir").onclick = async () => { const p = await window.api.pickFolder(); if (p) $("#setDemos").value = p; };
   $("#previewClose").onclick = closePreview;
   $("#playBtn").onclick = togglePlay;
@@ -96,7 +105,8 @@ async function parseAndShow(demoPath) {
   try {
     current = await window.api.parseDemo(demoPath, classifyOpts());
     current.demPath = current.demPath || demoPath;
-    renderMatch(); hideStatus();
+    if (current.css) renderCss(); else renderMatch();
+    hideStatus();
     if (settings.demosDir) loadFolder(settings.demosDir); // refresh (bz2 may be gone)
   } catch (e) { showStatus("Error: " + e.message); }
 }
@@ -118,6 +128,7 @@ async function scanFolder() {
       const d = demos[idx++];
       try {
         const r = await window.api.parseDemo(d.path, opts);
+        if (r.css) { skipped++; done++; continue; } // CS:S demos aren't part of the CS:GO best-of
         const demPath = r.demPath || d.path;
         // strip preview frames from the aggregate (reloaded from cache on Preview) — keeps memory small
         for (const h of r.highlights.slice(0, 30)) all.push({ ...h, preview: null, demPath, mapName: r.mapName, demoName: d.name });
@@ -185,6 +196,35 @@ function renderRoundBreakdown() {
   t.innerHTML = head + win + body;
   box.appendChild(t);
   box.querySelectorAll(".pname.clickable").forEach((c) => { c.onclick = () => { $("#coolSearch").value = c.dataset.name; renderHighlights(); }; });
+}
+
+function renderCss() {
+  $("#empty").style.display = "none"; $("#matchView").style.display = "block";
+  document.querySelector(".col-left").style.display = "none";
+  const hd = $("#matchHeader"); hd.innerHTML = "";
+  hd.appendChild(el("div", "map", current.mapName || "CS:S demo"));
+  hd.appendChild(el("div", "sub", `${current.frags.length} frags · CS:S (via cssff)`));
+  if (current.header && current.header.serverName) hd.appendChild(el("div", "sub", current.header.serverName));
+  $("#coolCount").textContent = "(" + current.frags.length + ")";
+  const box = $("#coolList"); box.innerHTML = "";
+  if (!current.frags.length) { box.appendChild(el("div", "muted", "No frags found by cssff (adjust cssff_settings.ini).")); return; }
+  current.frags.forEach((f, i) => {
+    const card = el("div", "ck");
+    const top = el("div", "top");
+    top.appendChild(el("div", "rank", "#" + (i + 1)));
+    const who = el("div", "who"); who.innerHTML = `<span class="${teamCls(f.team)}">${esc(f.player)}</span> <span class="vic">${esc(f.desc)}</span>`; top.appendChild(who);
+    card.appendChild(top);
+    const meta = el("div", "meta"); meta.appendChild(el("span", null, "tick " + f.tick)); card.appendChild(meta);
+    const act = el("div", "actions");
+    const cs = el("button", "mini", "Open in CS:S"); cs.onclick = () => openCssFrag(f); act.appendChild(cs);
+    card.appendChild(act); box.appendChild(card);
+  });
+}
+async function openCssFrag(f) {
+  const tr = current.tickrate || 66;
+  await window.api.writeVdm(current.demPath, [{ watchTick: Math.max(0, f.tick - tr), killTick: f.tick, endTick: f.tick + tr * 3, attacker: { name: f.player }, tags: [f.desc] }], {});
+  const r = await window.api.launchCss(current.demPath);
+  showStatus(r.ok ? "Launching CS:S… jumps to tick " + f.tick : (r.error || "Set CS:S exe in Settings") + "  (VDM written next to the demo.)");
 }
 
 function renderScoreboard() {
@@ -279,7 +319,9 @@ function renderHighlights() {
       const act = el("div", "actions");
       const pv = el("button", "mini", "▶ Preview"); pv.onclick = () => openPreview(h); act.appendChild(pv);
       const cs = el("button", "mini ghost", "Open in CS:GO"); cs.onclick = () => openInCsgo(h); act.appendChild(cs);
+
       card.appendChild(act);
+
       box.appendChild(card);
       return;
     }
@@ -300,7 +342,9 @@ function renderHighlights() {
     const act = el("div", "actions");
     const pv = el("button", "mini", "▶ Preview"); pv.onclick = () => openPreview(h); act.appendChild(pv);
     const cs = el("button", "mini ghost", "Open in CS:GO"); cs.onclick = () => openInCsgo(h); act.appendChild(cs);
+
     card.appendChild(act);
+
     box.appendChild(card);
   });
 }
@@ -498,12 +542,17 @@ async function exportVdm() {
 // ---------- settings ----------
 async function openSettings() {
   const s = await window.api.getSettings();
-  $("#setCsgo").value = s.csgoExe || ""; $("#setHlae").value = s.hlaeExe || "";
+  $("#setCsgo").value = s.csgoExe || ""; $("#setHlae").value = s.hlaeExe || ""; $("#setCss").value = s.cssExe || "";
   $("#setDemos").value = s.demosDir || ""; $("#setPreroll").value = s.prerollSec; $("#setLong").value = s.longRangeM;
   $("#setGap").value = s.multikillGapSec; $("#setFlick").value = s.flickMinDeg; $("#setBhop").value = s.bhopMinSpeed; $("#setConc").value = s.scanConcurrency;
   $("#setRunJumps").value = s.runMinJumps; $("#setRunPeak").value = s.runMinPeak; $("#setRunAir").value = s.runMinAir;
   $("#setNearby").value = s.nearbyRadius; $("#setEdge").value = s.edgebugMinDmg; $("#setMaxPrev").value = s.maxPreviewSec;
   $("#setDelBz2").checked = !!s.deleteBz2;
+  const fg = s.frag || {};
+  $("#fNsAwp").value = fg.noscopeAwp ?? FRAG_DEF.noscopeAwp; $("#fNsScout").value = fg.noscopeScout ?? FRAG_DEF.noscopeScout; $("#fNsAuto").value = fg.noscopeAuto ?? FRAG_DEF.noscopeAuto;
+  $("#fJump").value = fg.jumpDist ?? FRAG_DEF.jumpDist; $("#fJumpSn").value = fg.jumpSnipers ?? FRAG_DEF.jumpSnipers; $("#fFlick").value = fg.flickDist ?? FRAG_DEF.flickDist;
+  $("#fM3").value = fg.multi3 ?? FRAG_DEF.multi3; $("#fM3R").value = fg.multi3Rifles ?? FRAG_DEF.multi3Rifles; $("#fM3S").value = fg.multi3Snipers ?? FRAG_DEF.multi3Snipers;
+  $("#fM4").value = fg.multi4 ?? FRAG_DEF.multi4; $("#fM5").value = fg.multi5 ?? FRAG_DEF.multi5;
   const disabled = new Set(s.disabledCats || []);
   const cont = $("#catToggles"); cont.innerHTML = "";
   for (const c of CAT_DEFS) {
@@ -530,7 +579,7 @@ async function saveSettings() {
   const weights = {};
   document.querySelectorAll("#weightEditor input").forEach((i) => { const v = parseInt(i.value); if (!isNaN(v) && v !== defaultWeights[i.dataset.w]) weights[i.dataset.w] = v; });
   settings = await window.api.setSettings({
-    csgoExe: $("#setCsgo").value.trim(), hlaeExe: $("#setHlae").value.trim(), demosDir: $("#setDemos").value.trim(),
+    csgoExe: $("#setCsgo").value.trim(), hlaeExe: $("#setHlae").value.trim(), cssExe: $("#setCss").value.trim(), demosDir: $("#setDemos").value.trim(),
     prerollSec: parseFloat($("#setPreroll").value) || 1, longRangeM: parseInt($("#setLong").value) || 25,
     multikillGapSec: parseInt($("#setGap").value) || 8, flickMinDeg: parseInt($("#setFlick").value) || 22,
     bhopMinSpeed: parseInt($("#setBhop").value) || 260, deleteBz2: $("#setDelBz2").checked, disabledCats,
@@ -538,6 +587,12 @@ async function saveSettings() {
     runMinJumps: parseInt($("#setRunJumps").value) || 5, runMinPeak: parseInt($("#setRunPeak").value) || 300,
     runMinAir: parseInt($("#setRunAir").value) || 45, nearbyRadius: parseInt($("#setNearby").value) || 1000,
     edgebugMinDmg: parseInt($("#setEdge").value) || 20, maxPreviewSec: parseInt($("#setMaxPrev").value) || 25, weights,
+    frag: {
+      noscopeAwp: +$("#fNsAwp").value || FRAG_DEF.noscopeAwp, noscopeScout: +$("#fNsScout").value || FRAG_DEF.noscopeScout, noscopeAuto: +$("#fNsAuto").value || FRAG_DEF.noscopeAuto,
+      jumpDist: +$("#fJump").value || 0, jumpSnipers: +$("#fJumpSn").value || 0, flickDist: +$("#fFlick").value || FRAG_DEF.flickDist,
+      multi3: +$("#fM3").value || FRAG_DEF.multi3, multi3Rifles: +$("#fM3R").value || FRAG_DEF.multi3Rifles, multi3Snipers: +$("#fM3S").value || FRAG_DEF.multi3Snipers,
+      multi4: +$("#fM4").value || FRAG_DEF.multi4, multi5: +$("#fM5").value || FRAG_DEF.multi5,
+    },
   });
   $("#settingsModal").style.display = "none";
   // classify is instant (raw is cached), so just re-run — thresholds & weights apply live

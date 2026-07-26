@@ -10,11 +10,13 @@
     "start": "electron .",
     "analyze": "node analyze.js",
     "dist": "electron-builder",
+    "publish": "electron-builder --publish always",
     "dist:portable": "electron-builder --win portable",
     "dist:dir": "electron-builder --dir"
   },
   "dependencies": {
     "demofile": "^2.10.0",
+    "electron-updater": "^6.8.9",
     "seek-bzip": "^2.0.0"
   },
   "devDependencies": {
@@ -25,13 +27,35 @@
     "appId": "com.demohighlights.app",
     "productName": "CSGO Demo Highlights",
     "asar": false,
-    "compression": "normal",
-    "directories": { "output": "dist" },
+    "compression": "maximum",
+    "directories": {
+      "output": "dist"
+    },
     "files": [
-      "main.js", "preload.js", "parser.js", "parse-worker.js", "settings.js", "vdm.js",
-      "renderer/**/*", "assets/**/*", "maps/**/*"
+      "main.js",
+      "preload.js",
+      "parser.js",
+      "parse-worker.js",
+      "settings.js",
+      "vdm.js",
+      "renderer/**/*",
+      "assets/**/*",
+      "maps/**/*"
     ],
-    "win": { "target": "nsis" },
-    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true, "perMachine": false, "createDesktopShortcut": true }
+    "extraResources": [
+      { "from": "vendor/cssff", "to": "cssff" }
+    ],
+    "win": {
+      "target": "nsis"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "perMachine": false,
+      "createDesktopShortcut": true
+    },
+    "publish": [
+      { "provider": "github", "owner": "3388888", "repo": "cc-demo-highlights" }
+    ]
   }
 }
