@@ -1,71 +1,71 @@
 # CSGO Demo Highlights
 
-A desktop app that scans **CS:GO (Source 1 / `HL2DEMO`) demos**, finds and ranks the
-cool moments — aces, clutches, jump-noscopes, flicks, wallbangs, RNG shots, bhop
-runs, edgebugs — and shows each one as a **2D radar preview** plus a one-click
+A Windows desktop app that scans **CS:GO (Source 1 / `HL2DEMO`) demos**, finds and ranks
+the coolest moments — aces, clutches, jump-noscopes, flicks, wallbangs, RNG shots, surfs,
+bhop runs, flashboosts — and shows each one as a **2D radar preview** plus a one-click
 **"Open in CS:GO"** that jumps the real game to the moment (via a `.vdm`).
-
-> Source 1 / CS:GO only. CS2 and CS:S demos are **not** supported (different engines).
 
 ## Features
 
-- **Scoreboard** + **round-by-round** kill breakdown, like the in-game one.
-- **Ranked highlights** with real CS killfeed icons (weapon + modifier icons:
-  no-scope, in-air, wallbang, smoke, blind, headshot).
-- **Cool-kill detection**: ace / 4k / 3k, **clutch (1vX)**, jump-noscope, noscope,
-  flick / flick-HS, bhop, airborne, long-range, wallbang, collateral, airshot,
-  through-smoke / blind (streak), **RNG** (low-odds single-shot, with a hit-chance
-  model), **off-height** and **outnumbered** risky plays.
-- **Movement**: bhop runs (speed, jumps, airtime), **edgebug / jumpbug** (only shipped
-  if they saved real fall damage or led to a kill).
-- **2D preview** on the real map radar, with the shooter's aim cone, a live killfeed,
-  and **utility on the radar** (smokes, mollies, flashes, HE).
-- **Best of folder**: parse a whole folder in parallel and rank the best across all demos.
-- **Tunable**: every threshold *and* every scoring weight is editable in Settings.
-  Parsing is split into **decode-once (cached) + classify**, so changing settings
-  re-ranks in ~1s instead of re-parsing.
-- **Watch in CS:GO**: writes a `.vdm` so the game jumps to each highlight (works with HLAE).
+- **Scoreboard** + round-by-round kill breakdown, with real CS killfeed icons.
+- **Difficulty-weighted ranking** — long-range noscopes, flicks, wallbangs and hard
+  clutches rise to the top; close-range tag-salad and **warmup/DM** kills are excluded.
+- **cssff-style frag rules** as the minimum bar: distance-gated noscopes (scoped vs
+  no-scoped), jumpshots, flicks, and hard weapon-specific multikill timing — all editable.
+- **Movement**: bhop runs, **surf / wall-glide**, **edgebug / jumpbug**, **flashboost**
+  (a flash detonating next to a mate → velocity spike), all detected from telemetry.
+- **Troll kills**: knife / grenade / zeus (incl. knife multikills). Off by default.
+- **2D preview** on the real map radar — aim cone, live killfeed, utility (smokes/mollies/
+  flashes/HE), and **height cues** (elevation sticks + `↓150u` on cards, since demos are 2D).
+- **Best of folder**: scans a whole folder in parallel across **all your CPU cores**, then
+  **persists** the results — reopening loads instantly and only new demos get scanned.
+- **Instant filters**: map / weapon / kill-type / min-distance / favorites — all in-memory,
+  no reparse. Find e.g. a long-range AWP air-noscope or a long-range deagle in one click.
+- **Favorites → Demopack**: star clips, then export their demos (renamed `player_type_tick.dem`
+  + a `.vdm` per demo) into a folder for a fragmovie.
+- **Auto-updater** (electron-updater + GitHub releases).
+
+## Architecture
+
+Decode is split from ranking so settings changes never re-decode:
+
+- **`native/csgofast`** (Go, `demoinfocs-golang`) — the CS:GO decoder. ~3× faster than the
+  Node fallback, reads `.bz2` natively, emits the same `raw` JSON into a gzip cache.
+- **`vendor/cssff`** (bundled 3rd-party binary) — CS:S frag finder for older-protocol CS:S demos.
+- **`parser.js`** (Node) — `classify(raw, cfg)`: tags, scores, filters. Re-runs in ~1s from cache.
+- **Electron** main/preload/renderer for the UI; per-demo work runs in forked workers.
+
+Caches live in `%APPDATA%/CSGO Demo Highlights/` (`cache/`, `aggregate_v2.json.gz`,
+`favorites.json`, `settings.json`).
 
 ## Install / run
 
-Grab the **portable `.exe`** from Releases and run it — no install.
+Grab the installer from **Releases** and run it. First scan of a folder decodes each demo
+once (~4s per big demo via the Go decoder) and caches it; after that, reopening is instant.
 
-First open of each demo decodes it once (~15–40s depending on size) and caches the
-result (gzipped, ~1–10 MB per demo in `%APPDATA%/CSGO Demo Highlights/cache`). After
-that it's instant, and settings changes re-rank without re-decoding.
-
-**Open in CS:GO** needs the path to your `csgo.exe` (Settings). Point it at the build
-that recorded the demos — old demos on custom maps only play back in a matching build
-that has those maps.
+**Open in CS:GO** needs your `csgo.exe` path (Settings). Set a **netcon port** and launch
+CS:GO with `-netconport 2121` to jump in the *already-running* game.
 
 ## Build from source
 
 ```bash
 npm install
 npm start          # run in dev
-npm run dist       # build the portable .exe -> dist/
+npm run dist       # build the installer -> dist/
+npm run publish    # build + upload to the GitHub release (needs GH_TOKEN); enables auto-update
 ```
 
-Radars live in `maps/` (`<map>.png` + `maps.json` calibration). Generate them from a
-CS:GO install or from map BSPs:
+The Go decoder is prebuilt at `native/csgofast/csgofast.exe` and committed, so `npm run dist`
+works without Go. To rebuild it:
 
 ```bash
-python tools/build-radars.py "…/csgo/resource/overviews"      # official maps
-python tools/extract-bsp-radars.py "…/folder-of-bsp-or-bz2"   # custom maps (needs Pillow)
-```
-
-Maps without a radar fall back to an auto-fit view. Weapon icons in `assets/` come from
-[Juknum/counter-strike-icons](https://github.com/Juknum/counter-strike-icons).
-
-## CLI
-
-```bash
-node analyze.js "match.dem"        # text scoreboard + top highlights
+cd native/csgofast && go build -o csgofast.exe .
 ```
 
 ## Notes / limits
 
-- Radar images and weapon icons are derived from CS:GO game files — bundled for
-  convenience; regenerate your own if redistributing.
-- Movement detection is tuned for GOTV demos (~64 tick); thresholds are adjustable.
+- **Source 1 / CS:GO** demos. Older-protocol **CS:S** works via cssff; **Steam CS:S (v77)**
+  is not supported (WIP parser in `native/cssfast`).
+- Radar images and weapon icons are derived from CS:GO game files, bundled for convenience.
 - Pixel-surf isn't detected (needs collision geometry not present in demo data).
+- A 3D preview from map BSPs is planned but not yet built.

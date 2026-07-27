@@ -98,8 +98,28 @@ ipcMain.handle("demo:parse", (e, demoPath, opts) => new Promise((resolve, reject
   });
   child.on("error", (err) => { clearTimeout(timer); reject(err); });
   const cssffDir = app.isPackaged ? path.join(process.resourcesPath, "cssff") : path.join(__dirname, "vendor", "cssff");
-  child.send({ path: demoPath, opts, rawFile, cssffDir });
+  const csgofast = app.isPackaged ? path.join(process.resourcesPath, "csgofast", "csgofast.exe") : path.join(__dirname, "native", "csgofast", "csgofast.exe");
+  child.send({ path: demoPath, opts, rawFile, cssffDir, csgofast });
 }));
+
+// fast preview: slice just the frames for one highlight straight from the cached raw
+// (no full re-classify). This is what makes the preview open quickly.
+ipcMain.handle("demo:frames", (e, demPath, watchTick, endTick, maxPreviewSec) => {
+  try {
+    const rawFile = path.join(cacheDir(), rawKey(demPath));
+    if (!fs.existsSync(rawFile)) return null;
+    const raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(rawFile)));
+    const tickrate = raw.tickrate || 64;
+    const end = Math.min(endTick, watchTick + Math.round(tickrate * (maxPreviewSec || 25)));
+    const frames = [];
+    for (const f of raw.timeline) {
+      if (f.t < watchTick || f.t > end) continue;
+      frames.push({ tick: f.t, players: f.p.map((q) => ({ uid: q[0], x: q[1], y: q[2], yaw: q[3], team: q[4], z: q[5] == null ? null : q[5], name: (raw.roster[q[0]] || {}).name || "" })) });
+    }
+    const utils = (raw.utils || []).filter((u) => u.endTick >= watchTick && u.tick <= end);
+    return { tickrate, watchTick, endTick: end, frames, utils };
+  } catch { return null; }
+});
 
 // write a .vdm next to the demo covering all cool kills
 ipcMain.handle("vdm:write", (e, demPath, coolKills, opts) => {
@@ -125,6 +145,54 @@ ipcMain.handle("ratings:set", (e, key, patch) => {
 ipcMain.handle("feedback:export", (e, text) => {
   const p = path.join(app.getPath("desktop"), "demo-highlights-feedback.md");
   try { fs.writeFileSync(p, text); shell.showItemInFolder(p); return p; } catch (err) { return null; }
+});
+
+// persistent "best of folder" store — save all extracted highlights so the folder
+// scan is a ONE-TIME cost; reopening/filtering never re-reads demo caches.
+const zlib = require("zlib");
+function aggFile() { return path.join(app.getPath("userData"), "aggregate_v2.json.gz"); }
+ipcMain.handle("aggregate:load", () => { try { return JSON.parse(zlib.gunzipSync(fs.readFileSync(aggFile()))); } catch { return null; } });
+ipcMain.handle("aggregate:save", (e, data) => { try { fs.writeFileSync(aggFile(), zlib.gzipSync(JSON.stringify(data))); return true; } catch (err) { return false; } });
+ipcMain.handle("aggregate:clear", () => { try { fs.unlinkSync(aggFile()); } catch {} return true; });
+
+// favorites (for building a demopack)
+function favFile() { return path.join(app.getPath("userData"), "favorites.json"); }
+ipcMain.handle("favorites:get", () => { try { return JSON.parse(fs.readFileSync(favFile(), "utf8")); } catch { return {}; } });
+ipcMain.handle("favorites:set", (e, key, entry) => {
+  let all = {}; try { all = JSON.parse(fs.readFileSync(favFile(), "utf8")); } catch {}
+  if (entry == null) delete all[key]; else all[key] = entry;
+  try { fs.writeFileSync(favFile(), JSON.stringify(all)); } catch {}
+  return all;
+});
+// export favorites into a folder: copy each demo once, renamed player_type_tick.dem,
+// with a .vdm beside it that jumps through every favorited clip in that demo.
+ipcMain.handle("demopack:export", async (e, favs) => {
+  favs = (favs || []).filter((f) => f && f.demoPath);
+  if (!favs.length) return { ok: false, error: "No favorites yet — star some clips first." };
+  const r = await dialog.showOpenDialog(win, { properties: ["openDirectory", "createDirectory"], title: "Choose a folder for the demopack" });
+  if (r.canceled) return { ok: false, error: "cancelled" };
+  const outDir = r.filePaths[0];
+  const sani = (s) => String(s || "").replace(/[^\w.-]/g, "_").replace(/_+/g, "_").slice(0, 40) || "clip";
+  const byDemo = new Map();
+  for (const f of favs) { if (!byDemo.has(f.demoPath)) byDemo.set(f.demoPath, []); byDemo.get(f.demoPath).push(f); }
+  let copied = 0, failed = 0, clips = 0;
+  for (const [demoPath, list] of byDemo) {
+    try {
+      let src = demoPath;
+      if (fs.existsSync(src) && fs.statSync(src).isDirectory()) { const inner = fs.readdirSync(src).find((f) => /\.dem$/i.test(f)); if (inner) src = path.join(src, inner); }
+      if (!fs.existsSync(src)) { failed++; continue; }
+      list.sort((a, b) => (b.score || 0) - (a.score || 0));
+      const top = list[0];
+      const base = list.length === 1 ? `${sani(top.player)}_${sani(top.type)}_${top.tick}` : `${sani(top.player)}_${list.length}clips_${top.tick}`;
+      let dest = path.join(outDir, base + ".dem"), i = 2;
+      while (fs.existsSync(dest)) dest = path.join(outDir, `${base}_${i++}.dem`);
+      fs.copyFileSync(src, dest);
+      try { writeVdmForDemo(dest, list.map((c) => ({ watchTick: c.tick, killTick: c.killTick, endTick: c.endTick, attacker: { name: c.player }, tags: c.tags || [] })), {}); } catch {}
+      copied++; clips += list.length;
+    } catch { failed++; }
+  }
+  try { shell.openPath(outDir); } catch {}
+  return { ok: true, copied, failed, clips, dir: outDir };
 });
 
 // weapon + modifier SVG icons (read once)
@@ -154,11 +222,24 @@ ipcMain.handle("maps:radar", (e, map) => {
   } catch { return null; }
 });
 
-// launch CS:GO to play the demo (VDM auto-loads if same basename next to it)
-function launchGame(exe, demPath) {
-  if (!exe || !fs.existsSync(exe)) return { ok: false, error: "Set the game exe path in Settings first." };
-  try { const child = spawn(exe, ["-novid", "-insecure", "+playdemo", demPath], { detached: true, stdio: "ignore", cwd: path.dirname(exe) }); child.unref(); return { ok: true }; }
+// Try to hand the demo to an ALREADY-RUNNING game over its netconsole (requires the
+// game to have been launched with -netconport <port>). Resolves true on success.
+const net = require("net");
+function sendNetcon(port, cmds) {
+  return new Promise((resolve) => {
+    let done = false; const fin = (ok) => { if (!done) { done = true; resolve(ok); } };
+    const sock = net.connect({ host: "127.0.0.1", port }, () => { sock.write(cmds.join("\n") + "\n"); setTimeout(() => { try { sock.end(); } catch {} fin(true); }, 200); });
+    sock.setTimeout(700, () => { try { sock.destroy(); } catch {} fin(false); });
+    sock.on("error", () => fin(false));
+  });
+}
+// launch the game to play the demo (VDM auto-loads if same basename next to it).
+// If a netcon port is set and the game is up, jump in the running instance instead.
+async function launchGame(exe, demPath, port) {
+  if (port) { const ok = await sendNetcon(+port, [`playdemo "${demPath}"`]); if (ok) return { ok: true, running: true }; }
+  if (!exe || !fs.existsSync(exe)) return { ok: false, error: "Set the game exe path in Settings (or launch the game with -netconport)." };
+  try { const child = spawn(exe, ["-novid", "-insecure", ...(port ? ["-netconport", String(port)] : []), "+playdemo", demPath], { detached: true, stdio: "ignore", cwd: path.dirname(exe) }); child.unref(); return { ok: true }; }
   catch (err) { return { ok: false, error: err.message }; }
 }
-ipcMain.handle("csgo:launch", (e, demPath) => launchGame(settings.load().csgoExe, demPath));
-ipcMain.handle("css:launch", (e, demPath) => launchGame(settings.load().cssExe, demPath));
+ipcMain.handle("csgo:launch", (e, demPath) => { const s = settings.load(); return launchGame(s.csgoExe, demPath, s.csgoNetconPort); });
+ipcMain.handle("css:launch", (e, demPath) => { const s = settings.load(); return launchGame(s.cssExe, demPath, s.cssNetconPort); });

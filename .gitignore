@@ -1,5 +1,9 @@
 node_modules/
 dist/
-maps/*.png
 *.log
 .DS_Store
+Thumbs.db
+
+# Go build/test intermediates (source + the built .exe ARE committed so the app builds without Go)
+native/**/*.test
+*.tmp

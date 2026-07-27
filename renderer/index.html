@@ -13,7 +13,8 @@
       <div class="side-actions">
         <button id="btnOpenDemos">Open demo(s)…</button>
         <button id="btnOpenFolder" class="ghost">Open folder…</button>
-        <button id="btnScanFolder" class="ghost" title="Parse every demo in the folder and rank the best kills across all of them">★ Best of folder</button>
+        <button id="btnScanFolder" class="ghost" title="Load the saved highlights + scan only new demos. Shift+click to re-extract everything.">★ Best of folder</button>
+        <button id="btnDemopack" class="ghost" title="Copy every favorited clip's demo into a folder, renamed, with a VDM per demo" style="display:none">★ Demopack (0)</button>
       </div>
       <div id="demoList" class="demo-list"></div>
       <button id="btnSettings" class="ghost settings-btn">⚙ Settings</button>
@@ -40,7 +41,14 @@
             </h2>
             <div class="cool-filter">
               <input id="coolSearch" type="text" placeholder="filter by player (killer or victim)…" />
-              <button id="coolClear" class="mini ghost" title="clear filter">✕</button>
+              <button id="coolClear" class="mini ghost" title="clear all filters">✕</button>
+            </div>
+            <div class="cool-filter2">
+              <select id="filterMap" title="map"><option value="">any map</option></select>
+              <select id="filterWeapon" title="weapon"><option value="">any weapon</option></select>
+              <select id="filterType" title="kill type"><option value="">any type</option></select>
+              <input id="filterDist" type="number" min="0" step="5" placeholder="min m" title="minimum distance (meters)" />
+              <select id="filterFav" title="favorites"><option value="">all</option><option value="fav">★ favorites</option></select>
             </div>
             <div id="coolList"></div>
           </div>
@@ -81,60 +89,68 @@
   <div id="settingsModal" class="modal" style="display:none">
     <div class="modal-box narrow">
       <div class="modal-head"><div>Settings</div><button id="settingsClose" class="x">✕</button></div>
-      <label>csgo.exe path <small>(for “Open in CS:GO”)</small></label>
+
+      <div class="set-section">Paths</div>
+      <label>CS:GO exe <small>“Open in CS:GO”</small></label>
       <div class="row"><input id="setCsgo" type="text" placeholder="…\ClassicCounter\csgo.exe" /><button id="pickCsgo" class="mini">Browse</button></div>
-      <label>HLAE executable <small>(optional)</small></label>
-      <div class="row"><input id="setHlae" type="text" placeholder="…\HLAE\hlae.exe" /><button id="pickHlae" class="mini">Browse</button></div>
-      <label>CS:S exe <small>(for “Open in CS:S”)</small></label>
+      <label>CS:S exe <small>“Open in CS:S”</small></label>
       <div class="row"><input id="setCss" type="text" placeholder="…\Counter-Strike Source\hl2.exe" /><button id="pickCss" class="mini">Browse</button></div>
+      <div class="row2">
+        <div><label>HLAE exe <small>(optional)</small></label><div class="row"><input id="setHlae" type="text" placeholder="hlae.exe" /><button id="pickHlae" class="mini">…</button></div></div>
+        <div><label>Netcon port <small>(jump in running game)</small></label><input id="setNetcon" type="number" placeholder="e.g. 2121" /></div>
+      </div>
       <label>Default demos folder</label>
       <div class="row"><input id="setDemos" type="text" /><button id="pickDemosDir" class="mini">Browse</button></div>
+
+      <div class="set-section">Frag rules <small>— the minimum bar for a kill to qualify (cssff-style). Distances in units (~52 u/m), times in sec.</small></div>
+      <div class="set-sub">No-scope needs distance (scoped snipers need much more — that's their job)</div>
       <div class="row2">
-        <div><label>Preroll (sec before kill)</label><input id="setPreroll" type="number" step="0.25" min="0" /></div>
-        <div><label>Long-range (meters)</label><input id="setLong" type="number" step="1" min="1" /></div>
-        <div><label>Multikill gap (sec)</label><input id="setGap" type="number" step="1" min="1" /></div>
-        <div><label>Scan threads <small>(parallel)</small></label><input id="setConc" type="number" step="1" min="1" max="32" /></div>
+        <div><label>AWP no-scope dist</label><input id="fNsAwp" type="number" step="100" /></div>
+        <div><label>Scout no-scope dist</label><input id="fNsScout" type="number" step="100" /></div>
+        <div><label>Auto no-scope dist</label><input id="fNsAuto" type="number" step="100" /></div>
       </div>
       <div class="row2">
-        <div><label>Flick min (degrees)</label><input id="setFlick" type="number" step="1" min="1" /></div>
-        <div><label>Bhop min speed (u/s)</label><input id="setBhop" type="number" step="5" min="1" /></div>
+        <div><label>Scoped long-range dist</label><input id="fScoped" type="number" step="100" /></div>
+        <div><label>Long-range dist (other guns)</label><input id="fLong" type="number" step="100" /></div>
       </div>
+      <div class="set-sub">Jump / flick</div>
+      <div class="row2">
+        <div><label>Jumpshot dist</label><input id="fJump" type="number" step="100" /></div>
+        <div><label>Sniper jumpshot dist</label><input id="fJumpSn" type="number" step="100" /></div>
+        <div><label>Flick min °</label><input id="setFlick" type="number" step="1" min="1" /></div>
+        <div><label>Flick min dist</label><input id="fFlick" type="number" step="20" /></div>
+      </div>
+      <div class="set-sub">Multikill — max seconds start→finish (hard cap; your number is the ceiling)</div>
+      <div class="row2">
+        <div><label>3k</label><input id="fM3" type="number" step="0.1" /></div>
+        <div><label>3k rifle</label><input id="fM3R" type="number" step="0.1" /></div>
+        <div><label>3k sniper</label><input id="fM3S" type="number" step="0.5" /></div>
+        <div><label>4k</label><input id="fM4" type="number" step="0.5" /></div>
+        <div><label>5k</label><input id="fM5" type="number" step="0.5" /></div>
+      </div>
+
+      <div class="set-section">Movement</div>
       <div class="row2">
         <div><label>Bhop min jumps</label><input id="setRunJumps" type="number" step="1" min="1" /></div>
         <div><label>Bhop min speed</label><input id="setRunPeak" type="number" step="10" min="250" /></div>
         <div><label>Bhop min air %</label><input id="setRunAir" type="number" step="5" min="0" max="100" /></div>
+        <div><label>Bhop max sec</label><input id="setRunMax" type="number" step="1" min="3" /></div>
       </div>
-      <div class="row2">
-        <div><label>Outnumbered radius</label><input id="setNearby" type="number" step="100" min="100" /></div>
-        <div><label>Edgebug min dmg</label><input id="setEdge" type="number" step="5" min="0" /></div>
-        <div><label>Max preview (sec)</label><input id="setMaxPrev" type="number" step="5" min="5" /></div>
-      </div>
-      <label style="margin-top:12px">Frag rules <small>— cssff-style distances (units) & multikill times (sec)</small></label>
-      <div class="row2">
-        <div><label>AWP noscope dist</label><input id="fNsAwp" type="number" step="100" /></div>
-        <div><label>Scout noscope dist</label><input id="fNsScout" type="number" step="100" /></div>
-        <div><label>Auto noscope dist</label><input id="fNsAuto" type="number" step="100" /></div>
-      </div>
-      <div class="row2">
-        <div><label>Jumpshot dist</label><input id="fJump" type="number" step="100" /></div>
-        <div><label>Sniper jumpshot dist</label><input id="fJumpSn" type="number" step="100" /></div>
-        <div><label>Flick min dist</label><input id="fFlick" type="number" step="20" /></div>
-      </div>
-      <div class="row2">
-        <div><label>3k max sec</label><input id="fM3" type="number" step="0.1" /></div>
-        <div><label>3k rifle sec</label><input id="fM3R" type="number" step="0.1" /></div>
-        <div><label>3k sniper sec</label><input id="fM3S" type="number" step="0.5" /></div>
-        <div><label>4k max sec</label><input id="fM4" type="number" step="0.5" /></div>
-        <div><label>5k max sec</label><input id="fM5" type="number" step="0.5" /></div>
-      </div>
-      <label>Show these categories <button id="catAll" class="mini ghost" type="button">all</button> <button id="catNone" class="mini ghost" type="button">none</button></label>
+
+      <div class="set-section">Categories to show <button id="catAll" class="mini ghost" type="button">all</button> <button id="catNone" class="mini ghost" type="button">none</button></div>
       <div id="catToggles" class="cat-toggles"></div>
-      <label style="margin-top:12px">Scoring weights <small>— how many points each thing is worth (higher = ranks higher)</small> <button id="wReset" class="mini ghost" type="button">reset</button></label>
-      <div id="weightEditor" class="weight-editor"></div>
-      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:14px">
+
+      <div class="set-section">General</div>
+      <div class="row2">
+        <div><label>Preroll (sec)</label><input id="setPreroll" type="number" step="0.25" min="0" /></div>
+        <div><label>Max preview (sec)</label><input id="setMaxPrev" type="number" step="5" min="5" /></div>
+        <div><label>Outnumbered radius</label><input id="setNearby" type="number" step="100" min="100" /></div>
+        <div><label>Scan threads</label><input id="setConc" type="number" step="1" min="1" max="32" /></div>
+      </div>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:12px">
         <input id="setDelBz2" type="checkbox" style="width:auto" /> Delete the .bz2 after extracting it
       </label>
-      <div class="hint">Thresholds re-parse the demo; category toggles apply instantly.</div>
+      <div class="hint">Frag-rule &amp; movement changes re-extract the folder; categories &amp; the view filters apply instantly.</div>
       <div class="modal-foot"><button id="settingsSave">Save</button></div>
     </div>
   </div>

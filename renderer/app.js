@@ -1,6 +1,22 @@
 const $ = (s) => document.querySelector(s);
 const el = (t, c, txt) => { const e = document.createElement(t); if (c) e.className = c; if (txt != null) e.textContent = txt; return e; };
 const TEAM = { 2: "t", 3: "ct" };
+// "1 tap" vs sprayed — shotsBeforeKill counts the shooter's shots around the kill,
+// so shots-1 ≈ missed bullets. Lets you tell a 1-tap from a spray at a glance.
+const shotStr = (k) => {
+  const s = k.shotsBeforeKill;
+  if (s == null) return "";
+  if (s <= 1) return ` <span class="shots tap">1 tap</span>`;
+  return ` <span class="shots">${s} shots<span class="muted"> · ${s - 1} miss</span></span>`;
+};
+// elevation of attacker vs victim at the kill (needs z in the shot — newly parsed demos only)
+const heightStr = (k) => {
+  const f = k.shot && k.shot.from, t = k.shot && k.shot.to;
+  if (!f || !t || f.z == null || t.z == null) return "";
+  const dz = Math.round(f.z - t.z);
+  if (Math.abs(dz) < 60) return "";
+  return dz > 0 ? ` <span class="hgt">↓${dz}u</span>` : ` <span class="hgt up">↑${-dz}u</span>`;
+};
 const TAG_LABEL = {
   ace: "ACE", quad: "4K", triple: "3K", clutch: "CLUTCH", jump_noscope: "jump noscope", noscope: "noscope",
   bhop: "bhop", airborne: "airborne", boosted: "boosted", flick_hs: "flick HS", flick: "flick",
@@ -9,6 +25,7 @@ const TAG_LABEL = {
   rng: "RNG", off_height: "off height", outnumbered: "outnumbered", spin: "360 / spin",
   jumpshot: "jumpshot", smoke_kill: "smoke kill", blind_kill: "flashed kill",
   bhop_run: "bhop run", fast: "fast", long_chain: "long chain", edgebug: "edgebug", jumpbug: "jumpbug", into_kill: "→ kill",
+  troll: "troll 🃏", surf: "surf", flashboost: "flashboost",
 };
 const HOT = new Set(["ace", "quad", "clutch", "jump_noscope", "collateral", "flick_hs", "bhop", "rng", "off_height"]);
 const tagLabel = (tg, h) => (tg === "clutch" && h && h.clutchX ? "CLUTCH 1v" + h.clutchX : (TAG_LABEL[tg] || tg));
@@ -25,6 +42,9 @@ const CAT_DEFS = [
   { key: "bhop", label: "Bhop / air", tags: ["bhop", "airborne", "boosted"] },
   { key: "movement", label: "Movement runs", tags: ["bhop_run", "fast", "long_chain"] },
   { key: "tricks", label: "Edgebug / jumpbug", tags: ["edgebug", "jumpbug"] },
+  { key: "troll", label: "Troll (knife/nade/zeus)", tags: ["troll"] },
+  { key: "surf", label: "Surf / wall-glide", tags: ["surf"] },
+  { key: "flashboost", label: "Flashboost", tags: ["flashboost"] },
   { key: "rng", label: "RNG / risky", tags: ["rng", "off_height", "outnumbered"] },
   { key: "long_range", label: "Long range", tags: ["long_range"] },
   { key: "wallbang", label: "Wallbangs", tags: ["wallbang"] },
@@ -38,7 +58,44 @@ const tagToCat = {}; for (const c of CAT_DEFS) for (const t of c.tags) tagToCat[
 let current = null, settings = null, defaultWeights = {};
 const radarCache = {};
 // cssff-style frag rule defaults (mirror parser FRAG), shown in Settings
-const FRAG_DEF = { noscopeAwp: 2000, noscopeScout: 8000, noscopeAuto: 2000, jumpDist: 800, jumpSnipers: 0, flickDist: 120, multi3: 2, multi3Rifles: 0.8, multi3Snipers: 4, multi4: 6.5, multi5: 13 };
+const FRAG_DEF = { noscopeAwp: 2000, noscopeScout: 8000, noscopeAuto: 2000, scopedDist: 3200, longRangeUnits: 1400, jumpDist: 800, jumpSnipers: 500, flickDist: 120, multi3: 2, multi3Rifles: 0.8, multi3Snipers: 4, multi4: 6.5, multi5: 13 };
+
+// ---------- favorites / demopack ----------
+let favorites = {};
+const TYPE_SHORT = { ace: "ace", quad: "4k", triple: "3k", clutch: "clutch", jump_noscope: "jns", noscope: "ns", jumpshot: "jump", flick_hs: "flick", flick: "flick", spin: "360", wallbang: "wb", collateral: "collat", airshot: "airshot", smoke_kill: "smoke", blind_kill: "flashed", bhop_run: "bhop", edgebug: "edgebug", jumpbug: "jumpbug", surf: "surf", flashboost: "flashboost", troll: "troll", rng: "rng", off_height: "offheight", outnumbered: "clutch", long_range: "longrange" };
+function favTypeShort(h) { if (h.clutchX) return "clutch1v" + h.clutchX; for (const t of (h.tags || [])) if (TYPE_SHORT[t]) return TYPE_SHORT[t]; return (h.tags && h.tags[0]) || "kill"; }
+function favDemoName(h) { return h.demoName || ((h.demPath || (current && current.demPath) || "").split(/[\\/]/).pop()) || "demo"; }
+function favKey(h) { return `${favDemoName(h)}|${h.killTick}|${h.attacker.name}|${h.type || "kill"}`; }
+function favEntry(h) {
+  return { demoPath: h.demPath || (current && current.demPath) || "", demoName: favDemoName(h),
+    player: h.attacker.name, tick: h.watchTick, killTick: h.killTick, endTick: h.endTick,
+    type: favTypeShort(h), tags: h.tags || [], score: h.coolScore || 0 };
+}
+async function toggleFav(h, btn) {
+  const key = favKey(h);
+  const on = !!favorites[key];
+  favorites = await window.api.setFavorite(key, on ? null : favEntry(h)) || favorites;
+  if (btn) { const nowOn = !!favorites[key]; btn.textContent = nowOn ? "★" : "☆"; btn.classList.toggle("on", nowOn); }
+  updateDemopackBtn();
+}
+function favBtn(h) {
+  const on = !!favorites[favKey(h)];
+  const b = el("button", "mini fav" + (on ? " on" : ""), on ? "★" : "☆");
+  b.title = "add to demopack"; b.onclick = () => toggleFav(h, b);
+  return b;
+}
+function updateDemopackBtn() {
+  const n = Object.keys(favorites).length;
+  const b = $("#btnDemopack"); if (b) { b.textContent = `★ Demopack (${n})`; b.style.display = n ? "block" : "none"; }
+}
+async function exportDemopack() {
+  const favs = Object.values(favorites);
+  if (!favs.length) { showStatus("Star some clips first (☆ on each card)."); return; }
+  showStatus("Building demopack…");
+  const r = await window.api.exportDemopack(favs);
+  if (r && r.ok) showStatus(`Demopack: ${r.copied} demos (${r.clips} clips) → ${r.dir}${r.failed ? ` · ${r.failed} missing` : ""}`);
+  else showStatus((r && r.error) || "Demopack export failed.");
+}
 
 
 // all tunables sent to the engine's classify step (instant, no re-decode)
@@ -47,7 +104,7 @@ function classifyOpts() {
   return {
     prerollSec: s.prerollSec, longRangeM: s.longRangeM, flickMinDeg: s.flickMinDeg, bhopMinSpeed: s.bhopMinSpeed,
     multikillGapSec: s.multikillGapSec, rngMaxChance: s.rngMaxChance, runMinJumps: s.runMinJumps, runMinPeak: s.runMinPeak,
-    runMinAir: s.runMinAir, nearbyRadius: s.nearbyRadius, edgebugMinDmg: s.edgebugMinDmg, maxPreviewSec: s.maxPreviewSec,
+    runMinAir: s.runMinAir, runMaxSec: s.runMaxSec, nearbyRadius: s.nearbyRadius, edgebugMinDmg: s.edgebugMinDmg, maxPreviewSec: s.maxPreviewSec,
     weights: s.weights || {}, frag: s.frag || {}, deleteBz2: s.deleteBz2,
   };
 }
@@ -56,6 +113,8 @@ let parseProgress = { name: "", prefix: "" };
   settings = await window.api.getSettings();
   try { const ic = await window.api.getIcons(); if (ic) window.ICONS = ic; } catch {}
   try { defaultWeights = await window.api.getDefaultWeights() || {}; } catch {}
+  try { favorites = await window.api.getFavorites() || {}; } catch {}
+  updateDemopackBtn();
 
   window.api.onParseProgress(({ frac }) => { if (!scanning && $("#status").style.display !== "none") showProgress("Parsing " + parseProgress.name + " — " + Math.round(frac * 100) + "%", frac); });
   if (settings.demosDir) loadFolder(settings.demosDir);
@@ -65,7 +124,8 @@ let parseProgress = { name: "", prefix: "" };
 function wire() {
   $("#btnOpenDemos").onclick = async () => { const ps = await window.api.pickDemos(); if (ps.length) parseAndShow(ps[0]); };
   $("#btnOpenFolder").onclick = async () => { const d = await window.api.pickFolder(); if (d) { await window.api.setSettings({ demosDir: d }); settings.demosDir = d; loadFolder(d); } };
-  $("#btnScanFolder").onclick = scanFolder;
+  $("#btnScanFolder").onclick = (e) => scanFolder(e.shiftKey); // Shift+click = full re-extract
+  $("#btnDemopack").onclick = exportDemopack;
   $("#btnSettings").onclick = openSettings;
   $("#settingsClose").onclick = () => $("#settingsModal").style.display = "none";
   $("#settingsSave").onclick = saveSettings;
@@ -79,7 +139,9 @@ function wire() {
   $("#soloView").onchange = (e) => { window.api.setSettings({ soloView: e.target.checked }); if (settings) settings.soloView = e.target.checked; if (view) drawFrame(+$("#scrub").value); };
   $("#btnVdm").onclick = exportVdm;
   $("#coolSearch").oninput = () => renderHighlights();
-  $("#coolClear").onclick = () => { $("#coolSearch").value = ""; renderHighlights(); };
+  $("#coolClear").onclick = () => { $("#coolSearch").value = ""; for (const id of ["filterMap", "filterWeapon", "filterType", "filterDist", "filterFav"]) $("#" + id).value = ""; renderHighlights(); };
+  for (const id of ["filterMap", "filterWeapon", "filterType", "filterFav"]) $("#" + id).onchange = () => renderHighlights();
+  $("#filterDist").oninput = () => renderHighlights();
   document.onkeydown = (e) => { if (e.key === "Escape") { closePreview(); $("#settingsModal").style.display = "none"; } };
   // click the dark backdrop (outside the box) to close
   $("#previewModal").onclick = (e) => { if (e.target === $("#previewModal")) closePreview(); };
@@ -111,39 +173,71 @@ async function parseAndShow(demoPath) {
   } catch (e) { showStatus("Error: " + e.message); }
 }
 
+// signature of the DETECTION settings + classifier version — if any change, saved highlights are stale
+const CLASSIFY_VERSION = "4"; // bump when classify logic changes so the persistent store re-extracts
+function classifySig() {
+  const s = settings;
+  return CLASSIFY_VERSION + JSON.stringify({ p: s.prerollSec, l: s.longRangeM, f: s.flickMinDeg, b: s.bhopMinSpeed, g: s.multikillGapSec, r: s.rngMaxChance,
+    rj: s.runMinJumps, rp: s.runMinPeak, ra: s.runMinAir, rm: s.runMaxSec, n: s.nearbyRadius, e: s.edgebugMinDmg, mp: s.maxPreviewSec, w: s.weights, fr: s.frag });
+}
+
 let scanning = false;
-async function scanFolder() {
+// force=true re-scans every demo (e.g. after changing detection settings)
+async function scanFolder(force = false) {
   if (!settings.demosDir) { const d = await window.api.pickFolder(); if (!d) return; await window.api.setSettings({ demosDir: d }); settings.demosDir = d; }
   const demos = await window.api.listDemos(settings.demosDir);
   if (!demos.length) { showStatus("No demos in this folder."); return; }
   const opts = classifyOpts();
-  const all = [];
-  const N = Math.max(1, Math.min(settings.scanConcurrency || 6, demos.length));
+  const sig = classifySig();
+
+  // load the saved store; reuse it unless detection settings changed or caller forced a rescan
+  let saved = force ? null : await window.api.loadAggregate();
+  if (saved && (saved.sig !== sig || saved.dir !== settings.demosDir)) saved = null;
+  const scanned = new Set((saved && saved.scanned) || []);   // demo paths already extracted
+  let all = (saved && saved.highlights) || [];
+
+  const toScan = demos.filter((d) => !scanned.has(d.path));
+  if (!toScan.length && all.length) {
+    // everything already saved — instant, no cache reads
+    current = { aggregate: true, demoCount: scanned.size, skipped: 0, highlights: all };
+    renderAggregate(); hideStatus();
+    showStatus(`Loaded ${all.length} highlights from ${scanned.size} demos (saved). ${demos.length} demos in folder.`);
+    return;
+  }
+
+  // use ALL cores by default (decode is CPU-bound). Respect an explicit non-default setting.
+  const cores = navigator.hardwareConcurrency || 6;
+  const wantN = (settings.scanConcurrency && settings.scanConcurrency !== 6) ? settings.scanConcurrency : cores;
+  const N = Math.max(1, Math.min(wantN, 32, toScan.length));
   let idx = 0, done = 0, ok = 0, skipped = 0;
   const t0 = performance.now();
   scanning = true;
-  showProgress(`Parsing folder — 0/${demos.length} (×${N})`, 0);
+  const fresh = [];
+  showProgress(`Parsing ${toScan.length} new demo(s) — 0/${toScan.length} (×${N})${all.length ? ` · ${all.length} already saved` : ""}`, 0);
   async function worker() {
-    while (idx < demos.length) {
-      const d = demos[idx++];
+    while (idx < toScan.length) {
+      const d = toScan[idx++];
       try {
         const r = await window.api.parseDemo(d.path, opts);
-        if (r.css) { skipped++; done++; continue; } // CS:S demos aren't part of the CS:GO best-of
+        if (r.css) { skipped++; done++; scanned.add(d.path); continue; }
         const demPath = r.demPath || d.path;
-        // strip preview frames from the aggregate (reloaded from cache on Preview) — keeps memory small
-        for (const h of r.highlights.slice(0, 30)) all.push({ ...h, preview: null, demPath, mapName: r.mapName, demoName: d.name });
-        ok++;
+        for (const h of r.highlights.slice(0, 30)) fresh.push({ ...h, preview: null, demPath, mapName: r.mapName, demoName: d.name });
+        scanned.add(d.path); ok++;
       } catch (e) { console.warn("skip", d.name, e.message); skipped++; }
       done++;
-      const eta = ((performance.now() - t0) / done) * (demos.length - done) / 1000;
-      showProgress(`Parsing folder — ${done}/${demos.length} (×${N})${done < demos.length ? " · ~" + Math.ceil(eta) + "s left" : ""}`, done / demos.length);
+      const eta = ((performance.now() - t0) / done) * (toScan.length - done) / 1000;
+      showProgress(`Parsing ${toScan.length} new demo(s) — ${done}/${toScan.length} (×${N})${done < toScan.length ? " · ~" + Math.ceil(eta) + "s left" : ""}`, done / toScan.length);
     }
   }
   await Promise.all(Array.from({ length: N }, worker));
   scanning = false;
+  all = all.concat(fresh);
   all.sort((a, b) => b.coolScore - a.coolScore || a.watchTick - b.watchTick);
-  current = { aggregate: true, demoCount: ok, skipped, highlights: all };
+  // persist so the next open / filter never re-reads demo caches
+  await window.api.saveAggregate({ sig, dir: settings.demosDir, scanned: [...scanned], highlights: all });
+  current = { aggregate: true, demoCount: scanned.size, skipped, highlights: all };
   renderAggregate(); hideStatus();
+  if (fresh.length) showStatus(`Added ${fresh.length} highlights from ${ok} new demo(s). Total ${all.length} — saved.`);
 }
 
 function renderAggregate() {
@@ -153,6 +247,7 @@ function renderAggregate() {
   const hd = $("#matchHeader"); hd.innerHTML = "";
   hd.appendChild(el("div", "map", "Best of folder"));
   hd.appendChild(el("div", "sub", `${current.demoCount} demos · ${current.highlights.length} highlights` + (current.skipped ? ` · ${current.skipped} skipped (unsupported)` : "")));
+  populateFilters();
   renderHighlights();
 }
 
@@ -166,7 +261,7 @@ function renderMatch() {
   hd.appendChild(sc);
   hd.appendChild(el("div", "sub", `${current.score.rounds} rounds · ${current.tickrate} tick`));
   hd.appendChild(el("div", "sub", h.serverName));
-  renderScoreboard(); renderRoundBreakdown(); renderHighlights();
+  renderScoreboard(); renderRoundBreakdown(); populateFilters(); renderHighlights();
 }
 
 function renderRoundBreakdown() {
@@ -248,32 +343,76 @@ function renderScoreboard() {
 function stars(score) { const n = score >= 100 ? 5 : score >= 70 ? 4 : score >= 50 ? 3 : score >= 35 ? 2 : 1; return "★".repeat(n) + "☆".repeat(5 - n); }
 function teamCls(tn) { return tn === 3 ? "ct" : "t"; }
 
-function highlightVisible(h, search, disabled) {
-  if (search) {
-    const inAttacker = h.attacker.name.toLowerCase().includes(search);
-    const inVictim = h.kills.some((k) => k.victim && k.victim.name.toLowerCase().includes(search));
-    const inTag = h.tags.some((t) => t.replace(/_/g, " ").includes(search) || (TAG_LABEL[t] || "").toLowerCase().includes(search));
+function hMap(h) { return h.mapName || (current && current.mapName) || ""; }
+function hWeapons(h) { return (h.kills || []).map((k) => k.weapon).filter(Boolean); }
+function hMaxDistM(h) { return Math.max(0, ...(h.kills || []).map((k) => k.distM || 0)); }
+
+function highlightVisible(h, f) {
+  if (f.search) {
+    const inAttacker = h.attacker.name.toLowerCase().includes(f.search);
+    const inVictim = h.kills.some((k) => k.victim && k.victim.name.toLowerCase().includes(f.search));
+    const inTag = h.tags.some((t) => t.replace(/_/g, " ").includes(f.search) || (TAG_LABEL[t] || "").toLowerCase().includes(f.search));
     if (!inAttacker && !inVictim && !inTag) return false;
   }
-  if (!h.tags.some((t) => !disabled.has(tagToCat[t] || t))) return false;
+  if (!h.tags.some((t) => !f.disabled.has(tagToCat[t] || t))) return false;
+  if (f.map && hMap(h) !== f.map) return false;
+  if (f.weapon && !hWeapons(h).includes(f.weapon)) return false;
+  if (f.type && !h.tags.includes(f.type)) return false;
+  if (f.minDist && hMaxDistM(h) < f.minDist) return false;
+  if (f.fav && !favorites[favKey(h)]) return false;
   return true;
 }
 
+// fill the map/weapon/type dropdowns from whatever's loaded (instant, no reparse)
+function populateFilters() {
+  if (!current || !current.highlights) return;
+  const maps = new Set(), weps = new Set(), types = new Set();
+  for (const h of current.highlights) {
+    const m = hMap(h); if (m) maps.add(m);
+    for (const w of hWeapons(h)) weps.add(w);
+    for (const t of h.tags) if (TAG_LABEL[t] && !["into_kill", "fast", "long_chain"].includes(t)) types.add(t);
+  }
+  const fill = (sel, items, label, cur) => {
+    const v = cur != null ? cur : sel.value;
+    sel.innerHTML = `<option value="">${label}</option>` + [...items].sort().map((x) => `<option value="${esc(x)}">${esc(TAG_LABEL[x] || x)}</option>`).join("");
+    sel.value = v;
+  };
+  fill($("#filterMap"), maps, "any map");
+  fill($("#filterWeapon"), weps, "any weapon");
+  fill($("#filterType"), types, "any type");
+}
+
+function currentFilters() {
+  return {
+    search: ($("#coolSearch").value || "").toLowerCase().trim(),
+    disabled: new Set(settings.disabledCats || []),
+    map: $("#filterMap") ? $("#filterMap").value : "",
+    weapon: $("#filterWeapon") ? $("#filterWeapon").value : "",
+    type: $("#filterType") ? $("#filterType").value : "",
+    minDist: $("#filterDist") ? (parseInt($("#filterDist").value) || 0) : 0,
+    fav: $("#filterFav") ? $("#filterFav").value === "fav" : false,
+  };
+}
+
 function renderHighlights() {
-  const search = ($("#coolSearch").value || "").toLowerCase().trim();
-  const disabled = new Set(settings.disabledCats || []);
-  const list = current.highlights.filter((h) => highlightVisible(h, search, disabled));
+  const f = currentFilters();
+  const list = current.highlights.filter((h) => highlightVisible(h, f));
   $("#coolCount").textContent = "(" + list.length + (list.length !== current.highlights.length ? " of " + current.highlights.length : "") + ")";
   const box = $("#coolList"); box.innerHTML = "";
   if (!list.length) { box.appendChild(el("div", "muted", "No highlights match the filter.")); return; }
-  list.forEach((h, i) => {
+  // only render the top N cards — a 35k-kill aggregate would choke the DOM otherwise.
+  // they're sorted by score, so the best are always shown; filter/search narrows further.
+  const RENDER_CAP = 300;
+  const shown = list.slice(0, RENDER_CAP);
+  if (list.length > RENDER_CAP) box.appendChild(el("div", "muted", `Showing the top ${RENDER_CAP} of ${list.length}. Use the filter or a category toggle to narrow down.`));
+  shown.forEach((h, i) => {
     const card = el("div", "ck");
     const top = el("div", "top");
     top.appendChild(el("div", "rank", "#" + (i + 1)));
     const who = el("div", "who");
     const n = h.kills.length;
     if (h.type === "movement") {
-      const ml = h.tags.includes("edgebug") ? "edgebug" : h.tags.includes("jumpbug") ? "jumpbug" : "bhop run";
+      const ml = h.tags.includes("edgebug") ? "edgebug" : h.tags.includes("jumpbug") ? "jumpbug" : h.tags.includes("surf") ? "surf" : h.tags.includes("flashboost") ? "flashboost" : "bhop run";
       who.innerHTML = `${esc(h.attacker.name)} <span class="vic">— ${ml}</span>`;
     } else if (n > 1) {
       who.innerHTML = `${esc(h.attacker.name)} <span class="vic">— ${n} kills</span>`;
@@ -300,7 +439,7 @@ function renderHighlights() {
         const tr = h.tickrate || current.tickrate || 64;
         const gap = idx > 0 ? ` <span class="gap">+${((k.killTick - h.kills[idx - 1].killTick) / tr).toFixed(1)}s</span>` : "";
         row.innerHTML = `${idx + 1}. ${window.modifierIcons(k)}${window.weaponIcon(k.weapon)}${k.headshot ? window.headshotIcon() : ""} <span class="a">${esc(k.victim.name)}</span>` +
-          (k.distM != null ? ` <span class="muted">· ${k.distM}m</span>` : "") + gap;
+          (k.distM != null ? ` <span class="muted">· ${k.distM}m</span>` : "") + heightStr(k) + shotStr(k) + gap;
         kl.appendChild(row);
       });
       card.appendChild(kl);
@@ -311,7 +450,9 @@ function renderHighlights() {
     if (h.demoName) bits.push(`${h.mapName} · ${h.demoName.replace(/\.dem$/i, "")}`);
     if (h.type === "movement") {
       const m = h.movement;
-      if (m.maxSpeed != null) bits.push(`max ${m.maxSpeed} u/s`, `avg ${m.avgSpeed}`, `${m.jumps} jumps`, `${m.airPct}% air`, `${m.durSec}s`);
+      if (h.tags.includes("flashboost")) { bits.push(`flashboost → ${m.maxSpeed} u/s`, `+${m.boost} u/s spike`); if (m.killAfter && h.kills[0]) bits.push(`→ ${h.kills[0].weapon} kill`); }
+      else if (h.tags.includes("surf")) { bits.push(`surf · max ${m.maxSpeed} u/s`, `${m.durSec}s`, `${m.distUnits}u`); if (m.killAfter && h.kills[0]) bits.push(`→ ${h.kills[0].weapon} kill`); }
+      else if (m.maxSpeed != null) bits.push(`max ${m.maxSpeed} u/s`, `avg ${m.avgSpeed}`, `${m.jumps} jumps`, `${m.airPct}% air`, `${m.durSec}s`);
       else if (m.fallVel != null) { bits.push(`saved ~${m.dmgSaved} dmg (${m.fallVel} u/s fall)`); if (m.killAfter && h.kills[0]) bits.push(`→ ${h.kills[0].weapon} kill`); }
       bits.push(`watch tick ${h.watchTick}`);
       for (const b of bits) meta.appendChild(el("span", null, b));
@@ -319,7 +460,7 @@ function renderHighlights() {
       const act = el("div", "actions");
       const pv = el("button", "mini", "▶ Preview"); pv.onclick = () => openPreview(h); act.appendChild(pv);
       const cs = el("button", "mini ghost", "Open in CS:GO"); cs.onclick = () => openInCsgo(h); act.appendChild(cs);
-
+      act.appendChild(favBtn(h));
       card.appendChild(act);
 
       box.appendChild(card);
@@ -332,7 +473,9 @@ function renderHighlights() {
       if (t0.airborneAtKill) bits.push(`airborne @${t0.speedAtKill}u/s`);
       if (t0.flickDeg >= 25) bits.push(`flick ${t0.flickDeg}°`);
       if (k0.penetrated > 0) bits.push(`${k0.penetrated} wall`);
-      if (k0.hitChance != null && (h.tags.includes("rng") || h.tags.includes("off_height"))) bits.push(`~${Math.round(k0.hitChance * 100)}% shot${k0.shotsBeforeKill <= 1 ? " · 1 bullet" : ""}`);
+      if (k0.shotsBeforeKill != null) bits.push(k0.shotsBeforeKill <= 1 ? "1 tap" : `${k0.shotsBeforeKill} shots · ${k0.shotsBeforeKill - 1} miss`);
+      if (k0.shot && k0.shot.from && k0.shot.to && k0.shot.from.z != null && k0.shot.to.z != null) { const dz = Math.round(k0.shot.from.z - k0.shot.to.z); if (Math.abs(dz) >= 60) bits.push(dz > 0 ? `${dz}u above target` : `${-dz}u below target`); }
+      if (k0.hitChance != null && (h.tags.includes("rng") || h.tags.includes("off_height"))) bits.push(`~${Math.round(k0.hitChance * 100)}% odds`);
       if (h.tags.includes("outnumbered") && k0.nearbyEnemies) bits.push(`${k0.nearbyEnemies} enemies close`);
     }
     bits.push(`watch tick ${h.watchTick} · kill ${h.killTick}`);
@@ -342,7 +485,7 @@ function renderHighlights() {
     const act = el("div", "actions");
     const pv = el("button", "mini", "▶ Preview"); pv.onclick = () => openPreview(h); act.appendChild(pv);
     const cs = el("button", "mini ghost", "Open in CS:GO"); cs.onclick = () => openInCsgo(h); act.appendChild(cs);
-
+    act.appendChild(favBtn(h));
     card.appendChild(act);
 
     box.appendChild(card);
@@ -356,9 +499,9 @@ async function openPreview(h) {
   if ((!h.preview || !h.preview.frames || !h.preview.frames.length) && h.demPath) {
     showStatus("Loading preview…");
     try {
-      const r = await window.api.parseDemo(h.demPath, classifyOpts());
-      const match = r.highlights.find((x) => x.killTick === h.killTick && x.type === h.type && x.attacker.name === h.attacker.name);
-      if (match && match.preview) h.preview = match.preview;
+      // fast path: slice frames straight from the cached raw (no re-classify)
+      const pv = await window.api.getFrames(h.demPath, h.watchTick, h.endTick, (settings && settings.maxPreviewSec) || 25);
+      if (pv && pv.frames && pv.frames.length) h.preview = pv;
       hideStatus();
     } catch (e) { showStatus("Couldn't load preview: " + e.message); return; }
   }
@@ -467,10 +610,23 @@ function drawFrame(idx) {
   }
 
   const solo = settings && settings.soloView;
+  const attP = f.players.find((p) => p.uid === view.attackerUid);
+  const refZ = attP && attP.z != null ? attP.z : null; // heights shown relative to the watched player
   for (const p of f.players) {
     const isAtt = p.uid === view.attackerUid;
     if (solo && !isAtt) continue;
     const [cx, cy] = w2c(p.x, p.y, W, H);
+    // elevation vs the watched player: a vertical stick + label (needs z — newly parsed demos)
+    if (!isAtt && refZ != null && p.z != null) {
+      const dz = p.z - refZ;
+      if (Math.abs(dz) >= 80) {
+        const len = Math.max(-46, Math.min(46, -dz / 8));
+        ctx.strokeStyle = dz > 0 ? "rgba(111,211,255,.65)" : "rgba(255,157,111,.65)"; ctx.lineWidth = 1.5;
+        ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(cx, cy + len); ctx.stroke();
+        ctx.fillStyle = dz > 0 ? "#6fd3ff" : "#ff9d6f"; ctx.font = "9px Segoe UI";
+        ctx.fillText((dz > 0 ? "+" : "") + Math.round(dz), cx + 4, cy + len + (dz > 0 ? -2 : 8));
+      }
+    }
     if (p.yaw != null) {
       const rad = p.yaw * Math.PI / 180;
       if (isAtt) {
@@ -542,14 +698,15 @@ async function exportVdm() {
 // ---------- settings ----------
 async function openSettings() {
   const s = await window.api.getSettings();
-  $("#setCsgo").value = s.csgoExe || ""; $("#setHlae").value = s.hlaeExe || ""; $("#setCss").value = s.cssExe || "";
-  $("#setDemos").value = s.demosDir || ""; $("#setPreroll").value = s.prerollSec; $("#setLong").value = s.longRangeM;
-  $("#setGap").value = s.multikillGapSec; $("#setFlick").value = s.flickMinDeg; $("#setBhop").value = s.bhopMinSpeed; $("#setConc").value = s.scanConcurrency;
-  $("#setRunJumps").value = s.runMinJumps; $("#setRunPeak").value = s.runMinPeak; $("#setRunAir").value = s.runMinAir;
-  $("#setNearby").value = s.nearbyRadius; $("#setEdge").value = s.edgebugMinDmg; $("#setMaxPrev").value = s.maxPreviewSec;
+  $("#setCsgo").value = s.csgoExe || ""; $("#setHlae").value = s.hlaeExe || ""; $("#setCss").value = s.cssExe || ""; $("#setNetcon").value = s.csgoNetconPort || "";
+  $("#setDemos").value = s.demosDir || ""; $("#setPreroll").value = s.prerollSec; $("#setConc").value = s.scanConcurrency;
+  $("#setFlick").value = s.flickMinDeg;
+  $("#setRunJumps").value = s.runMinJumps; $("#setRunPeak").value = s.runMinPeak; $("#setRunAir").value = s.runMinAir; $("#setRunMax").value = s.runMaxSec;
+  $("#setNearby").value = s.nearbyRadius; $("#setMaxPrev").value = s.maxPreviewSec;
   $("#setDelBz2").checked = !!s.deleteBz2;
   const fg = s.frag || {};
   $("#fNsAwp").value = fg.noscopeAwp ?? FRAG_DEF.noscopeAwp; $("#fNsScout").value = fg.noscopeScout ?? FRAG_DEF.noscopeScout; $("#fNsAuto").value = fg.noscopeAuto ?? FRAG_DEF.noscopeAuto;
+  $("#fScoped").value = fg.scopedDist ?? FRAG_DEF.scopedDist; $("#fLong").value = fg.longRangeUnits ?? FRAG_DEF.longRangeUnits;
   $("#fJump").value = fg.jumpDist ?? FRAG_DEF.jumpDist; $("#fJumpSn").value = fg.jumpSnipers ?? FRAG_DEF.jumpSnipers; $("#fFlick").value = fg.flickDist ?? FRAG_DEF.flickDist;
   $("#fM3").value = fg.multi3 ?? FRAG_DEF.multi3; $("#fM3R").value = fg.multi3Rifles ?? FRAG_DEF.multi3Rifles; $("#fM3S").value = fg.multi3Snipers ?? FRAG_DEF.multi3Snipers;
   $("#fM4").value = fg.multi4 ?? FRAG_DEF.multi4; $("#fM5").value = fg.multi5 ?? FRAG_DEF.multi5;
@@ -562,42 +719,39 @@ async function openSettings() {
   }
   $("#catAll").onclick = () => cont.querySelectorAll("input").forEach((c) => (c.checked = true));
   $("#catNone").onclick = () => cont.querySelectorAll("input").forEach((c) => (c.checked = false));
-  // weight editor
-  const we = $("#weightEditor"); we.innerHTML = "";
-  const wOver = s.weights || {};
-  for (const tag of Object.keys(defaultWeights)) {
-    const row = el("label", "wrow");
-    row.innerHTML = `<span>${TAG_LABEL[tag] || tag}</span><input type="number" data-w="${tag}" value="${wOver[tag] != null ? wOver[tag] : defaultWeights[tag]}" />`;
-    we.appendChild(row);
-  }
-  $("#wReset").onclick = () => we.querySelectorAll("input").forEach((i) => (i.value = defaultWeights[i.dataset.w]));
   $("#settingsModal").style.display = "flex";
 }
 async function saveSettings() {
   const prev = settings;
   const disabledCats = [...document.querySelectorAll("#catToggles input:not(:checked)")].map((c) => c.dataset.cat);
-  const weights = {};
-  document.querySelectorAll("#weightEditor input").forEach((i) => { const v = parseInt(i.value); if (!isNaN(v) && v !== defaultWeights[i.dataset.w]) weights[i.dataset.w] = v; });
   settings = await window.api.setSettings({
-    csgoExe: $("#setCsgo").value.trim(), hlaeExe: $("#setHlae").value.trim(), cssExe: $("#setCss").value.trim(), demosDir: $("#setDemos").value.trim(),
-    prerollSec: parseFloat($("#setPreroll").value) || 1, longRangeM: parseInt($("#setLong").value) || 25,
-    multikillGapSec: parseInt($("#setGap").value) || 8, flickMinDeg: parseInt($("#setFlick").value) || 22,
-    bhopMinSpeed: parseInt($("#setBhop").value) || 260, deleteBz2: $("#setDelBz2").checked, disabledCats,
+    csgoExe: $("#setCsgo").value.trim(), hlaeExe: $("#setHlae").value.trim(), cssExe: $("#setCss").value.trim(), csgoNetconPort: $("#setNetcon").value.trim(), demosDir: $("#setDemos").value.trim(),
+    prerollSec: parseFloat($("#setPreroll").value) || 1, flickMinDeg: parseInt($("#setFlick").value) || 22,
+    deleteBz2: $("#setDelBz2").checked, disabledCats,
     scanConcurrency: Math.max(1, Math.min(parseInt($("#setConc").value) || 6, 32)),
     runMinJumps: parseInt($("#setRunJumps").value) || 5, runMinPeak: parseInt($("#setRunPeak").value) || 300,
-    runMinAir: parseInt($("#setRunAir").value) || 45, nearbyRadius: parseInt($("#setNearby").value) || 1000,
-    edgebugMinDmg: parseInt($("#setEdge").value) || 20, maxPreviewSec: parseInt($("#setMaxPrev").value) || 25, weights,
+    runMinAir: parseInt($("#setRunAir").value) || 45, runMaxSec: parseInt($("#setRunMax").value) || 12, nearbyRadius: parseInt($("#setNearby").value) || 1000,
+    maxPreviewSec: parseInt($("#setMaxPrev").value) || 25,
     frag: {
       noscopeAwp: +$("#fNsAwp").value || FRAG_DEF.noscopeAwp, noscopeScout: +$("#fNsScout").value || FRAG_DEF.noscopeScout, noscopeAuto: +$("#fNsAuto").value || FRAG_DEF.noscopeAuto,
+      scopedDist: +$("#fScoped").value || FRAG_DEF.scopedDist, longRangeUnits: +$("#fLong").value || FRAG_DEF.longRangeUnits,
       jumpDist: +$("#fJump").value || 0, jumpSnipers: +$("#fJumpSn").value || 0, flickDist: +$("#fFlick").value || FRAG_DEF.flickDist,
       multi3: +$("#fM3").value || FRAG_DEF.multi3, multi3Rifles: +$("#fM3R").value || FRAG_DEF.multi3Rifles, multi3Snipers: +$("#fM3S").value || FRAG_DEF.multi3Snipers,
       multi4: +$("#fM4").value || FRAG_DEF.multi4, multi5: +$("#fM5").value || FRAG_DEF.multi5,
     },
   });
   $("#settingsModal").style.display = "none";
-  // classify is instant (raw is cached), so just re-run — thresholds & weights apply live
-  if (current && current.aggregate) scanFolder();
-  else if (current) parseAndShow(current.demPath);
+  // Only re-tag if a DETECTION setting changed. Category toggles, paths, and the view
+  // filters are applied client-side (instant) — no need to re-read 1600 demo caches.
+  const sig = (s) => JSON.stringify({ p: s.prerollSec, l: s.longRangeM, f: s.flickMinDeg, b: s.bhopMinSpeed, g: s.multikillGapSec, r: s.rngMaxChance,
+    rj: s.runMinJumps, rp: s.runMinPeak, ra: s.runMinAir, rm: s.runMaxSec, n: s.nearbyRadius, e: s.edgebugMinDmg, mp: s.maxPreviewSec, w: s.weights, fr: s.frag });
+  const detectionChanged = sig(prev) !== sig(settings);
+  if (detectionChanged) {
+    if (current && current.aggregate) scanFolder(true);   // tagging changed -> re-extract (saved store is stale)
+    else if (current) parseAndShow(current.demPath);
+  } else if (current) {
+    populateFilters(); renderHighlights();                // just filters/paths -> instant
+  }
   if (settings.demosDir && settings.demosDir !== prev.demosDir) loadFolder(settings.demosDir);
 }
 

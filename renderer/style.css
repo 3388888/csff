@@ -126,6 +126,18 @@ td.name.clickable { cursor: pointer; } td.name.clickable:hover { color: var(--ac
 .ck .kills-list .kl .a { color: var(--text); } .ck .kills-list .kl .w { color: var(--accent); }
 .ck .kills-list .kl .hs { color: var(--bad); }
 .ck .kills-list .kl .gap { color: #6a7a8a; font-size: 10.5px; }
+.shots { color: #8fa3b3; font-size: 10.5px; }
+.shots.tap { color: var(--accent); font-weight: 600; }
+.mini.fav { font-size: 14px; line-height: 1; padding: 4px 8px; color: #8fa3b3; }
+.mini.fav.on { color: #ffcf4d; border-color: #ffcf4d55; }
+.hgt { color: #6fd3ff; font-size: 10.5px; }
+.hgt.up { color: #ff9d6f; }
+.cool-filter2 { display: flex; gap: 6px; margin: 6px 0 10px; flex-wrap: wrap; }
+.cool-filter2 select, .cool-filter2 input { background: #171b21; color: var(--text); border: 1px solid #2a323c; border-radius: 6px; padding: 5px 7px; font-size: 12px; flex: 1; min-width: 84px; }
+.cool-filter2 input[type=number] { max-width: 78px; flex: 0 0 auto; }
+.set-section { font-weight: 600; font-size: 13px; color: var(--accent); margin: 18px 0 8px; padding-bottom: 5px; border-bottom: 1px solid #2a323c; }
+.set-section:first-of-type { margin-top: 4px; }
+.set-sub { font-size: 11px; color: var(--muted); margin: 8px 0 4px; }
 .player-controls { display: flex; align-items: center; gap: 10px; margin-top: 10px; }
 .player-controls input[type=range] { flex: 1; }
 #playBtn { width: 42px; }

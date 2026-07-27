@@ -20,7 +20,7 @@ const DEFAULTS = {
   longRangeM: 25, flickMinDeg: 22,
   bhopMinSpeed: 260, boostVz: 250, streakForSmokeBlind: 3,
   multikillGapSec: 8, rngMaxChance: 0.25,
-  runContinueSpeed: 200, runMinJumps: 5, runMinPeak: 300, runMinAir: 45,
+  runContinueSpeed: 200, runMinJumps: 5, runMinPeak: 300, runMinAir: 45, runMaxSec: 12,
   edgebugMinDmg: 20, nearbyRadius: 1000, maxPreviewSec: 25, maxHighlights: 80,
   weights: null, // {tag: number} overrides for TAGW
 };
@@ -32,7 +32,10 @@ const TAGW = {
   flick_hs: 55, flick: 35, spin: 55, long_range: 25, wallbang: 45, airshot: 22, collateral: 45,
   smoke_kill: 30, blind_kill: 40, smoke_streak: 20, blind_streak: 25, rng: 55, off_height: 45, outnumbered: 35,
   bhop_run: 22, fast: 12, long_chain: 20, edgebug: 55, jumpbug: 45, into_kill: 45,
+  troll: 50, surf: 48, flashboost: 46,
 };
+// "funny" kills: melee, grenade/molotov, or zeus. A knife/nade multikill is peak troll.
+const TROLL_RE = /knife|bayonet|karambit|daggers?|butterfly|falchion|huntsman|shadow_daggers|ursus|navaja|stiletto|talon|nomad|skeleton|classic_knife|paracord|survival_knife|gut_knife|flip_knife|m9_bayonet|hegrenade|molotov|incgrenade|inferno|firebomb|taser/i;
 const SNIPERS = new Set(["awp", "ssg08", "scar20", "g3sg1"]);
 // weapon categories + cssff-derived frag thresholds (source units / seconds)
 const WPCAT = { ak47: "Rifles", m4a1: "Rifles", m4a1_silencer: "Rifles", sg556: "Rifles", aug: "Rifles", famas: "Rifles", galilar: "Rifles",
@@ -40,16 +43,23 @@ const WPCAT = { ak47: "Rifles", m4a1: "Rifles", m4a1_silencer: "Rifles", sg556: 
   glock: "Pistols", hkp2000: "Pistols", p2000: "Pistols", usp_silencer: "Pistols", p250: "Pistols", tec9: "Pistols", cz75a: "Pistols", fiveseven: "Pistols", elite: "Pistols",
   deagle: "Deagle", revolver: "Deagle",
   mp9: "Smgs", mac10: "Smgs", mp7: "Smgs", ump45: "Smgs", p90: "Smgs", bizon: "Smgs", mp5sd: "Smgs",
-  nova: "Shotguns", xm1014: "Shotguns", mag7: "Shotguns", sawedoff: "Shotguns" };
-const wcat = (w) => WPCAT[(w || "").toLowerCase()] || "Rifles";
+  nova: "Shotguns", xm1014: "Shotguns", mag7: "Shotguns", sawedoff: "Shotguns", m249: "Rifles", negev: "Rifles",
+  hegrenade: "Knife", molotov: "Knife", incgrenade: "Knife", inferno: "Knife", taser: "Knife" };
+// knife/nade/zeus -> "Knife" category (lenient multikill timing) so troll multis actually tick
+const wcat = (w) => { const s = (w || "").toLowerCase(); return WPCAT[s] || (/knife|bayonet|karambit|dagger|butterfly|falchion|huntsman|ursus|navaja|stiletto|talon|nomad|skeleton|paracord|gut|flip|m9|shadow/.test(s) ? "Knife" : "Rifles"); };
 const FRAG = {
   noscopeDist: { Snipers: 2000, Scout: 8000, AutoSnipers: 2000 }, noscopeHsMod: { Snipers: 0.5, Scout: 0.375, AutoSnipers: 0.666 },
-  jumpDist: { default: 800, Snipers: 0, Scout: 1000, AutoSnipers: 2000 }, jumpHsMod: 0.65,
+  scopedDist: 3200,  // a SCOPED sniper kill only counts as long-range past this (units) — scoped kills are their job
+  longRangeUnits: 1400, // non-sniper long-range gate (~27m)
+  jumpDist: { default: 800, Snipers: 500, Scout: 1000, AutoSnipers: 2000 }, jumpHsMod: 0.65,
   flickDist: { default: 120, Rifles: 160 },
   multiMax: { 3: { default: 2, Rifles: 0.8, Snipers: 4, AutoSnipers: 1.6, Pistols: 1.2, Deagle: 3, Shotguns: 3, Knife: 4 }, 4: { default: 6.5, Snipers: 10, Shotguns: 15, Knife: 15 }, 5: { default: 13, Snipers: 15, Scout: 15, Shotguns: 15, Knife: 60 } },
   multiExtra: { 3: 0.5, 4: 1, 5: 3 }, // per special kill in the burst
 };
-const SPECIAL_TAGS = new Set(["noscope", "jump_noscope", "jumpshot", "flick", "flick_hs", "wallbang", "smoke_kill", "blind_kill", "spin"]);
+const SPECIAL_TAGS = new Set(["noscope", "jump_noscope", "jumpshot", "flick", "flick_hs", "wallbang", "smoke_kill", "blind_kill", "spin", "troll"]);
+// a single kill must have one of these "real frag" reasons to be a highlight at all (cssff-style
+// minimum bar). "outnumbered"/airborne/boosted are context modifiers — they don't qualify alone.
+const QUALIFY_TAGS = new Set(["noscope", "jump_noscope", "jumpshot", "flick", "flick_hs", "spin", "wallbang", "collateral", "smoke_kill", "blind_kill", "airshot", "long_range", "off_height", "troll"]);
 const WBASE = { awp: .95, ssg08: .92, scar20: .85, g3sg1: .85, ak47: .72, m4a1: .75, m4a1_silencer: .78, sg556: .7, aug: .74, famas: .66, galilar: .64,
   deagle: .6, revolver: .55, glock: .66, hkp2000: .7, usp_silencer: .72, p250: .68, tec9: .62, cz75a: .6, fiveseven: .7, elite: .58,
   mp9: .66, mac10: .6, mp7: .66, ump45: .66, p90: .64, bizon: .62, mp5sd: .68, nova: .5, xm1014: .48, mag7: .5, sawedoff: .45, m249: .55, negev: .5 };
@@ -86,6 +96,8 @@ function parseRaw(demPath, opts = {}) {
     const fireBuf = new Map();  // uid -> recent weapon_fire ticks
     const runState = new Map(), movementRuns = [];
     const trickPrev = new Map(), tricks = [];
+    const surfState = new Map();
+    const flashes = [], fbPrev = new Map();
     const roster = {};          // uid -> {name, team}
     const timeline = [];
     let lastTL = -1e9, lastProg = 0, lastAcceptTick = 0;
@@ -113,7 +125,7 @@ function parseRaw(demPath, opts = {}) {
       header = demo.header;
       tickrate = header.playbackTime > 0 ? Math.round(header.playbackTicks / header.playbackTime) : 64;
       if (![64, 128].includes(tickrate)) tickrate = tickrate > 96 ? 128 : 64;
-      telWin = tickrate; previewStep = Math.max(1, Math.round(tickrate / 32));
+      telWin = tickrate; previewStep = Math.max(1, Math.round(tickrate / 20)); // ~20fps timeline (lighter)
       maxTick = header.playbackTicks + 2 * tickrate;
       runGapTicks = Math.round(tickrate * 0.45);
     });
@@ -154,6 +166,35 @@ function parseRaw(demPath, opts = {}) {
       p.vz = s.vz; p.onGround = s.onGround; p.spd = s.spd;
     }
 
+    // surf / wall-glide: sustained airborne travel at speed with a controlled descent
+    function trackSurf(pl, s) {
+      const uid = pl.userId, ct = demo.currentTick;
+      let st = surfState.get(uid); if (!st) { st = { air: false }; surfState.set(uid, st); }
+      if (!s.onGround && s.spd >= 250) {
+        if (!st.air) Object.assign(st, { air: true, startTick: ct, ticks: 0, maxSpeed: 0, badVz: 0, startPos: { x: s.x, y: s.y }, endPos: { x: s.x, y: s.y } });
+        st.ticks++; st.maxSpeed = Math.max(st.maxSpeed, s.spd); if (s.vz < -420) st.badVz++; st.endPos = { x: s.x, y: s.y };
+      } else if (st.air) {
+        st.air = false;
+        const dur = ct - st.startTick, dist = Math.round(Math.hypot(st.endPos.x - st.startPos.x, st.endPos.y - st.startPos.y));
+        if (dur >= Math.round(tickrate * 0.8) && st.maxSpeed >= 350 && dist >= 500 && st.badVz <= st.ticks / 2)
+          tricks.push({ uid, name: pl.name, steamId: pl.steamId || null, team: pl.teamNumber, tick: st.startTick, kind: "surf", fallVel: st.maxSpeed, spd: s.spd, durTicks: dur, dist });
+      }
+    }
+    // flashboost: a flashbang detonating next to a mate imparts a big velocity spike
+    function trackFlashboost(pl, s) {
+      const uid = pl.userId, ct = demo.currentTick, pv = fbPrev.get(uid);
+      fbPrev.set(uid, s.spd);
+      if (pv == null || s.spd - pv < 180 || s.spd < 300) return;
+      const win = Math.round(tickrate * 0.4);
+      for (let i = flashes.length - 1; i >= 0; i--) {
+        const f = flashes[i]; if (ct - f.tick > win) break; if (ct - f.tick < 0) continue;
+        if (Math.hypot(s.x - f.x, s.y - f.y, (s.z || 0) - (f.z || 0)) <= 320) {
+          tricks.push({ uid, name: pl.name, steamId: pl.steamId || null, team: pl.teamNumber, tick: ct, kind: "flashboost", fallVel: s.spd, spd: s.spd - pv });
+          return;
+        }
+      }
+    }
+
     demo.on("tickend", () => {
       const ringLen = RING(), ct = demo.currentTick;
       if (opts.onProgress && ct >= 0) {
@@ -172,7 +213,9 @@ function parseRaw(demPath, opts = {}) {
         let buf = buffers.get(uid); if (!buf) { buf = []; buffers.set(uid, buf); }
         buf.push(s); if (buf.length > ringLen) buf.shift();
         trackRun(pl, s); trackTricks(pl, s);
-        if (frame) frame.p.push([uid, r1(s.x), r1(s.y), s.yaw == null ? null : Math.round(s.yaw), pl.teamNumber]);
+        trackSurf(pl, s);
+        trackFlashboost(pl, s);
+        if (frame) frame.p.push([uid, r1(s.x), r1(s.y), s.yaw == null ? null : Math.round(s.yaw), pl.teamNumber, Math.round(s.z || 0)]);
       }
       if (frame) timeline.push(frame);
     });
@@ -194,7 +237,7 @@ function parseRaw(demPath, opts = {}) {
     demo.gameEvents.on("smokegrenade_detonate", (e) => addUtil("smoke", e, 17.5));
     demo.gameEvents.on("inferno_startburn", (e) => addUtil("fire", e, 7));
     demo.gameEvents.on("hegrenade_detonate", (e) => addUtil("he", e, 0.4));
-    demo.gameEvents.on("flashbang_detonate", (e) => addUtil("flash", e, 0.4));
+    demo.gameEvents.on("flashbang_detonate", (e) => { addUtil("flash", e, 0.4); flashes.push({ tick: demo.currentTick, x: e.x, y: e.y, z: e.z }); });
     demo.gameEvents.on("decoy_started", (e) => addUtil("decoy", e, 15));
 
     function infoOf(userid) { if (userid == null) return null; const e = demo.entities.getByUserId(userid); if (!e) return null; return { name: e.name, steamId: e.steamId || null, team: e.teamNumber, uid: e.userId, pos: safe(() => e.position) || null }; }
@@ -297,6 +340,8 @@ function classify(raw, cfg = {}) {
   const F = {
     noscopeDist: { Snipers: fc.noscopeAwp ?? FRAG.noscopeDist.Snipers, Scout: fc.noscopeScout ?? FRAG.noscopeDist.Scout, AutoSnipers: fc.noscopeAuto ?? FRAG.noscopeDist.AutoSnipers },
     noscopeHsMod: FRAG.noscopeHsMod,
+    scopedDist: fc.scopedDist ?? FRAG.scopedDist,
+    longRangeUnits: fc.longRangeUnits ?? FRAG.longRangeUnits,
     jumpDist: { default: fc.jumpDist ?? FRAG.jumpDist.default, Snipers: fc.jumpSnipers ?? FRAG.jumpDist.Snipers, Scout: FRAG.jumpDist.Scout, AutoSnipers: FRAG.jumpDist.AutoSnipers },
     jumpHsMod: FRAG.jumpHsMod,
     flickDist: { default: fc.flickDist ?? FRAG.flickDist.default, Rifles: FRAG.flickDist.Rifles },
@@ -319,9 +364,14 @@ function classify(raw, cfg = {}) {
   function movedInWindow(uid, a, b) { const arr = posByUid[uid]; if (!arr) return 999; let d = 0, prev = null; for (const p of arr) { if (p.t < a || p.t > b) continue; if (prev) d += Math.hypot(p.x - prev.x, p.y - prev.y); prev = p; } return prev ? d : 999; }
   function spinInWindow(uid, a, b) { const arr = posByUid[uid]; if (!arr) return 0; let s = 0, prev = null; for (const p of arr) { if (p.t < a || p.t > b || p.yaw == null) continue; if (prev != null) s += Math.abs(angleDiff(p.yaw, prev)); prev = p.yaw; } return Math.round(s); }
 
-  // rounds where a victim died 2+ times = warmup / DM refragging (less impressive)
-  const rvd = {}; for (const k of raw.kills) { const v = k.victim.steamId || k.victim.name; ((rvd[k.round] = rvd[k.round] || {})[v] = (rvd[k.round][v] || 0) + 1); }
-  const refragRound = {}; for (const r in rvd) refragRound[r] = Object.values(rvd[r]).some((c) => c >= 2);
+  // WARMUP / DM detection: in a real round a victim dies at most once and a round has at
+  // most ~10 kills. A victim dying 2+ times, or a flood of kills in one round, = warmup/DM.
+  // These rounds are EXCLUDED entirely (not just penalized) — they're never real highlights.
+  const rvd = {}, killsPerRound = {};
+  for (const k of raw.kills) { const v = k.victim.steamId || k.victim.name; ((rvd[k.round] = rvd[k.round] || {})[v] = (rvd[k.round][v] || 0) + 1); killsPerRound[k.round] = (killsPerRound[k.round] || 0) + 1; }
+  const warmupRound = {};
+  for (const r in rvd) warmupRound[r] = Object.values(rvd[r]).some((c) => c >= 2) || (killsPerRound[r] || 0) >= 12;
+  const refragRound = warmupRound; // (kept name for the scoring penalty on any that slip through)
 
   // enrich every kill (recompute hit-chance with the new model; flag afk/spin/warmup)
   for (const k of raw.kills) {
@@ -335,7 +385,7 @@ function classify(raw, cfg = {}) {
     const out = [];
     for (const f of raw.timeline) {
       if (f.t < a || f.t > b) continue;
-      out.push({ tick: f.t, players: f.p.map((q) => ({ uid: q[0], x: q[1], y: q[2], yaw: q[3], team: q[4], name: (raw.roster[q[0]] || {}).name || "" })) });
+      out.push({ tick: f.t, players: f.p.map((q) => ({ uid: q[0], x: q[1], y: q[2], yaw: q[3], team: q[4], z: q[5] == null ? null : q[5], name: (raw.roster[q[0]] || {}).name || "" })) });
     }
     return out;
   }
@@ -357,11 +407,15 @@ function classify(raw, cfg = {}) {
     if (k.penetrated > 0 && k.headshot) tags.push("wallbang"); // HS wallbangs only (cssff)
     if (k.smoke) tags.push("smoke_kill");
     if (k.blind) tags.push("blind_kill");
-    if (k.airshot) tags.push("airshot");
-    if (k.distM != null && k.distM >= cfg.longRangeM && !(sniper && !k.noscope)) tags.push("long_range");
+    if (k.airshot && d >= 400) tags.push("airshot"); // point-blank airshots aren't impressive
+    // long-range: scoped snipers need a much bigger distance (that's their job); noscopes &
+    // other weapons use the general gate. Separate distance requirements for scoped vs noscoped.
+    if (sniper && !k.noscope) { if (d >= F.scopedDist) tags.push("long_range"); }
+    else if (d >= F.longRangeUnits) tags.push("long_range");
     if (t.airborneAtKill && t.vzAtKill < -180 && k.noscope) tags.push("off_height"); // noscope while dropping off height
     k._nearby = (k.enemyDists || []).filter((dd) => dd <= cfg.nearbyRadius).length;
     if (k._nearby >= 3 && k.teamAlive <= k.enemyAliveAfter) tags.push("outnumbered");
+    if (TROLL_RE.test(k.weapon || "")) tags.push("troll"); // knife / nade / zeus = funny kill
     k._special = tags.some((tg) => SPECIAL_TAGS.has(tg));
     return tags;
   }
@@ -371,13 +425,26 @@ function classify(raw, cfg = {}) {
     const first = ks[0], last = ks[ks.length - 1];
     const watchTick = Math.max(0, first.killTick - prerollTicks);
     const endTick = last.killTick + postTicks;
-    let score = 0; for (const t of tags) score += W[t] || 10;
-    score += ks.filter((k) => k.headshot).length * 5;
-    if (tags.includes("long_range")) score += Math.min(Math.max(...ks.map((k) => k.distM || 0)), 30);
-    if (extra.clutchX) score += (extra.clutchX - 1) * 15;
-    for (const k of ks) if (k.hitChance != null && k.hitChance < 0.35) score += Math.round((1 - k.hitChance) * 40) + (k.shotsBeforeKill <= 1 ? 10 : 0);
+    // headline trick dominates; extra tags add with diminishing returns (no "tag-salad" inflation)
+    const tagW = tags.map((t) => W[t] || 10).sort((a, b) => b - a);
+    let score = tagW[0] || 0;
+    for (let i = 1; i < tagW.length; i++) score += tagW[i] * 0.35;
+    score += ks.filter((k) => k.headshot).length * 4;
+    // reward real range and movement flair generally (not only when a tag fired)
+    const maxDistM = Math.max(0, ...ks.map((k) => k.distM || 0));
+    score += Math.min(maxDistM, 40);
+    const maxSpd = Math.max(0, ...ks.map((k) => (k.telemetry && k.telemetry.speedAtKill) || 0));
+    if (maxSpd > 150) score += Math.min((maxSpd - 150) / 6, 25);
+    if (extra.clutchX) score += (extra.clutchX - 1) * 12;
     const risky = tags.some((t) => ["rng", "off_height", "outnumbered", "jump_noscope"].includes(t));
-    if (risky && raw.roundWinners[first.round] && raw.roundWinners[first.round] !== first.attacker.team) score += 25;
+    if (risky && raw.roundWinners[first.round] && raw.roundWinners[first.round] !== first.attacker.team) score += 20;
+    for (const k of ks) if (k.hitChance != null && k.hitChance < 0.3 && k.shotsBeforeKill <= 1) score += 12; // clean hard 1-taps
+
+    // DIFFICULTY MULTIPLIER — the big lever. hard kills (low hit-chance: long / airborne / fast /
+    // noscope) scale UP; easy point-blank 1-taps scale DOWN. This is what separates "best of the
+    // best" from a close-range 1v4 that just happened to stack a lot of tags.
+    const avgDiff = ks.reduce((s, k) => s + (k.hitChance != null ? (1 - k.hitChance) : 0.4), 0) / ks.length;
+    score *= 0.6 + avgDiff * 0.85; // ~0.6 (trivial) .. ~1.45 (brutal)
     // penalties from the user's feedback: AFK victims, and warmup/DM refrag rounds
     if (ks.every((k) => k._afkMoved < 120)) score *= 0.25;   // killed a barely-moving (AFK) player
     if (ks.every((k) => k._refrag)) score *= 0.55;           // warmup / deathmatch refragging
@@ -395,7 +462,7 @@ function classify(raw, cfg = {}) {
 
   // group kills by round + attacker
   const groups = new Map();
-  for (const k of raw.kills) { const key = k.round + "|" + (k.attacker.steamId || k.attacker.name); if (!groups.has(key)) groups.set(key, []); groups.get(key).push(k); }
+  for (const k of raw.kills) { if (warmupRound[k.round]) continue; const key = k.round + "|" + (k.attacker.steamId || k.attacker.name); if (!groups.has(key)) groups.set(key, []); groups.get(key).push(k); }
   for (const grp of groups.values()) {
     grp.sort((a, b) => a.killTick - b.killTick);
     for (const k of grp) k._tags = trickTags(k, grp.length);
@@ -413,9 +480,17 @@ function classify(raw, cfg = {}) {
     const flush = () => {
       if (chain.length >= 3) {
         const n = Math.min(chain.length, 5);
-        const cat = chain.map((k) => wcat(k.weapon)).reduce((a, b) => ((F.multiMax[n][b] ?? F.multiMax[n].default) > (F.multiMax[n][a] ?? F.multiMax[n].default) ? b : a));
+        const mt = (c) => F.multiMax[n][c] ?? F.multiMax[n].default;
+        // category = the weapon MOST kills used (ties -> the strictest / smallest time).
+        // Prevents one stray shotgun/knife kill from making a whole rifle burst "lenient".
+        const cnt = {}; for (const k of chain) { const c = wcat(k.weapon); cnt[c] = (cnt[c] || 0) + 1; }
+        const cat = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a] || mt(a) - mt(b))[0];
         const specials = chain.filter((k) => k._special).length;
-        const maxT = (F.multiMax[n][cat] ?? F.multiMax[n].default) + specials * (F.multiExtra[n] || 0);
+        const isTroll = cat === "Knife"; // knife/nade -> lenient window so troll multis can be detected
+        // the configured "Nk max sec" is a HARD ceiling — nothing shows longer than what you set.
+        // 4k/5k expose one field, so it governs every weapon; 3k has per-weapon fields. Weapon
+        // type can only make it STRICTER, never longer. No time bonus.
+        const maxT = n === 3 ? mt(cat) : (isTroll ? mt("Knife") : F.multiMax[n].default);
         const span = (chain[chain.length - 1].killTick - chain[0].killTick) / tickrate;
         const hs = chain.filter((k) => k.headshot).length;
         const minHs = (cat === "Snipers" || cat === "Scout" || cat === "AutoSnipers") ? 0 : (n === 3 ? 2 : 0);
@@ -432,21 +507,36 @@ function classify(raw, cfg = {}) {
     const byTick = new Map();
     for (const k of grp) { if (used.has(k)) continue; if (!byTick.has(k.killTick)) byTick.set(k.killTick, []); byTick.get(k.killTick).push(k); }
     for (const [, arr] of byTick) if (arr.length >= 2 && arr.some((k) => k.penetrated > 0)) { const tagSet = new Set(["collateral"]); for (const k of arr) { for (const t of k._tags) tagSet.add(t); used.add(k); } highlights.push(makeHighlight(arr, [...tagSet])); }
-    for (const k of grp) { if (used.has(k)) continue; if (k._tags.length) highlights.push(makeHighlight([k], k._tags)); }
+    for (const k of grp) { if (used.has(k)) continue; if (k._tags.some((t) => QUALIFY_TAGS.has(t))) highlights.push(makeHighlight([k], k._tags)); }
   }
 
-  // movement (bhop) runs — ONLY keep a run that ends in a kill (a pure run isn't a frag)
+  // movement (bhop) runs — keep ONLY a SHORT run that flows straight into a NOTABLE kill
+  // (a trick/rng kill or a multikill). Aimless long runs and runs ending in a plain
+  // kill are dropped — those are the "pure garbage" the user kept seeing.
+  const runKillWin = Math.round(tickrate * 2.5);
   for (const run of raw.movementRuns) {
     if (run.jumps < cfg.runMinJumps || run.maxSpeed < cfg.runMinPeak || run.airPct < cfg.runMinAir) continue;
-    const fk = raw.kills.find((k) => (k.attacker.steamId === run.steamId || k.attacker.name === run.name) && k.killTick >= run.startTick && k.killTick <= run.endTick + tickrate);
-    if (!fk) continue; // no kill during/after the run -> skip entirely
+    if (run.durSec > (cfg.runMaxSec || 12)) continue;            // a bhop route is a few seconds, not a 40s meander
+    // kills by this player from the run until shortly after it ends
+    const after = raw.kills
+      .filter((k) => (k.attacker.steamId === run.steamId || k.attacker.name === run.name) && k.killTick >= run.startTick && k.killTick <= run.endTick + runKillWin)
+      .sort((a, b) => a.killTick - b.killTick);
+    if (!after.length) continue;                                  // no kill -> not a frag
+    const lastKill = after[after.length - 1];
+    if (warmupRound[lastKill.round]) continue; // no warmup/DM bhop runs
+    if ((lastKill.killTick - run.endTick) / tickrate > 2.5) continue; // run must lead INTO the kill, not end long before it
+    // the payoff has to be worth watching: a trick/rng kill, or a multi (2+ in the window)
+    const notable = after.length >= 2 || after.some((k) => (k._tags && k._tags.length) || (k.hitChance != null && k.hitChance < 0.4));
+    if (!notable) continue;
     const tags = ["bhop_run", "into_kill"]; if (run.maxSpeed >= 400) tags.push("fast"); if (run.jumps >= 12) tags.push("long_chain");
     let score = 0; for (const t of tags) score += W[t] || 10;
-    score += Math.round(Math.min(run.maxSpeed, 500) - 250 + run.jumps * 6 + run.durSec * 2);
-    highlights.push({ id: hid++, type: "movement", round: fk ? fk.round : 0, attacker: { name: run.name, steamId: run.steamId, team: run.team, uid: run.uid },
-      tags, coolScore: score, clutchX: null, watchTick: Math.max(0, run.startTick - prerollTicks), killTick: run.startTick, endTick: (fk ? fk.killTick : run.endTick),
-      movement: { maxSpeed: run.maxSpeed, avgSpeed: run.avgSpeed, jumps: run.jumps, airPct: run.airPct, distUnits: run.distUnits, durSec: run.durSec, killAfter: !!fk },
-      kills: fk ? [{ killTick: fk.killTick, weapon: fk.weapon, headshot: fk.headshot, victim: fk.victim, telemetry: fk.telemetry, shot: fk.shot, tags: [] }] : [] });
+    score += Math.round(Math.min((run.maxSpeed - 250) / 8, 20) + Math.min(run.jumps, 15) + Math.min(run.durSec, 6)); // modest, capped
+    score += after.reduce((s, k) => s + (k._tags ? k._tags.reduce((a, t) => a + (W[t] || 0) * 0.5, 0) : 0), 0); // half-credit the payoff kill(s)
+    if (after.length >= 2) score += 20;
+    highlights.push({ id: hid++, type: "movement", round: lastKill.round, attacker: { name: run.name, steamId: run.steamId, team: run.team, uid: run.uid },
+      tags, coolScore: score, clutchX: null, watchTick: Math.max(0, run.startTick - prerollTicks), killTick: run.startTick, endTick: lastKill.killTick,
+      movement: { maxSpeed: run.maxSpeed, avgSpeed: run.avgSpeed, jumps: run.jumps, airPct: run.airPct, distUnits: run.distUnits, durSec: run.durSec, killAfter: true, killCount: after.length },
+      kills: after.slice(0, 5).map((k) => ({ killTick: k.killTick, weapon: k.weapon, headshot: k.headshot, victim: k.victim, hitChance: k.hitChance, shotsBeforeKill: k.shotsBeforeKill, telemetry: k.telemetry, shot: k.shot, tags: k._tags || [] })) });
   }
 
   // edgebug / jumpbug — ship only if enough fall damage saved OR a kill right after
@@ -456,10 +546,37 @@ function classify(raw, cfg = {}) {
   const lastTrick = {};
   for (const tr of raw.tricks) {
     const key = tr.uid + "|" + tr.kind; if (lastTrick[key] && tr.tick - lastTrick[key] < tickrate) continue; lastTrick[key] = tr.tick;
-    const dmgSaved = fallDmg(tr.fallVel);
     const fk = raw.kills.find((k) => (k.attacker.steamId === tr.steamId || k.attacker.name === tr.name) && k.killTick >= tr.tick && k.killTick <= tr.tick + killWin);
-    if (dmgSaved < cfg.edgebugMinDmg && !fk) continue;
-    const tags = fk ? [tr.kind, "into_kill"] : [tr.kind];
+    if (fk && warmupRound[fk.round]) continue; // no warmup/DM tricks
+    if (tr.kind === "surf") {
+      // surf / wall-glide: keep a long one on its own, or any that flows into a kill
+      const longSurf = (tr.durTicks || 0) >= tickrate * 1.2;
+      if (!fk && !longSurf) continue;
+      const tags = fk ? ["surf", "into_kill"] : ["surf"];
+      let score = (W.surf || 40) + (fk ? (W.into_kill || 45) : 0) + Math.round(Math.min((tr.fallVel || 0) / 20, 20) + Math.min((tr.durTicks || 0) / tickrate * 8, 20));
+      highlights.push({ id: hid++, type: "movement", round: fk ? fk.round : 0, attacker: { name: tr.name, steamId: tr.steamId, team: tr.team, uid: tr.uid },
+        tags, coolScore: score, clutchX: null, watchTick: Math.max(0, tr.tick - prerollTicks), killTick: tr.tick, endTick: (fk ? fk.killTick : tr.tick + (tr.durTicks || tickrate)) + postTicks,
+        movement: { maxSpeed: tr.fallVel, durSec: +(((tr.durTicks || 0) / tickrate).toFixed(1)), distUnits: tr.dist, killAfter: !!fk },
+        kills: fk ? [{ killTick: fk.killTick, weapon: fk.weapon, headshot: fk.headshot, victim: fk.victim, hitChance: fk.hitChance, shotsBeforeKill: fk.shotsBeforeKill, telemetry: fk.telemetry, shot: fk.shot, tags: [] }] : [] });
+      continue;
+    }
+    if (tr.kind === "flashboost") {
+      // flash-boosted mate — a rare, deliberate movement moment; keep it (tag the kill if one follows)
+      const tags = fk ? ["flashboost", "into_kill"] : ["flashboost"];
+      let score = (W.flashboost || 46) + (fk ? (W.into_kill || 45) : 0) + Math.round(Math.min((tr.fallVel || 0) / 8, 30));
+      highlights.push({ id: hid++, type: "movement", round: fk ? fk.round : 0, attacker: { name: tr.name, steamId: tr.steamId, team: tr.team, uid: tr.uid },
+        tags, coolScore: score, clutchX: null, watchTick: Math.max(0, tr.tick - prerollTicks), killTick: tr.tick, endTick: (fk ? fk.killTick : tr.tick) + postTicks,
+        movement: { maxSpeed: tr.fallVel, boost: tr.spd, killAfter: !!fk },
+        kills: fk ? [{ killTick: fk.killTick, weapon: fk.weapon, headshot: fk.headshot, victim: fk.victim, hitChance: fk.hitChance, shotsBeforeKill: fk.shotsBeforeKill, telemetry: fk.telemetry, shot: fk.shot, tags: [] }] : [] });
+      continue;
+    }
+    // edgebug/jumpbug: must lead to a kill (kill-less ones are almost all surfs/flashboosts
+    // off the map). Also drop it if a surf glide started right around it — that's a surf.
+    if (!fk) continue;
+    const surfNear = raw.tricks.some((s) => s.kind === "surf" && s.uid === tr.uid && Math.abs(s.tick - tr.tick) <= tickrate * 2);
+    if (surfNear) continue;
+    const dmgSaved = fallDmg(tr.fallVel);
+    const tags = [tr.kind, "into_kill"];
     let score = 0; for (const t of tags) score += W[t] || 10; score += dmgSaved;
     highlights.push({ id: hid++, type: "movement", round: fk ? fk.round : 0, attacker: { name: tr.name, steamId: tr.steamId, team: tr.team, uid: tr.uid },
       tags, coolScore: score, clutchX: null, watchTick: Math.max(0, tr.tick - prerollTicks), killTick: tr.tick, endTick: (fk ? fk.killTick : tr.tick) + postTicks,

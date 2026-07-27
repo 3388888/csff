@@ -4,9 +4,24 @@
 const fs = require("fs");
 const path = require("path");
 const zlib = require("zlib");
-const { execFileSync } = require("child_process");
+const { execFileSync, spawn } = require("child_process");
 const seekBzip = require("seek-bzip");
 const { parseRaw, classify } = require("./parser");
+
+// native Go decoder (csgofast) — same raw JSON, ~3x faster than the Node decode.
+// Writes the gzipped raw straight to the cache file; falls back to Node if absent.
+function runCsgofast(demPath, exe, outGz, onProgress) {
+  return new Promise((resolve, reject) => {
+    const ch = spawn(exe, [demPath, outGz], { windowsHide: true });
+    let err = "";
+    ch.stderr.on("data", (d) => {
+      const s = d.toString(); err += s;
+      for (const m of s.matchAll(/P\s+([0-9.]+)/g)) { const f = parseFloat(m[1]); if (onProgress && f >= 0 && f <= 1) onProgress(f); }
+    });
+    ch.on("error", reject);
+    ch.on("close", (code) => code === 0 ? resolve() : reject(new Error("csgofast failed: " + err.split("\n").filter(Boolean).pop())));
+  });
+}
 
 // CS:S demos (protocol 3 / cstrike) aren't supported by our parser — run the
 // bundled cssff.exe (native, works on v34) and parse its frag list instead.
@@ -59,12 +74,32 @@ process.on("message", async (msg) => {
       try { raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(msg.rawFile))); } catch { raw = null; }
     }
     if (!raw) {
-      const p = resolveDem(msg.path, opts.deleteBz2);
-      if (!fs.existsSync(p)) throw new Error("File not found: " + p);
-      if (demoKind(p) === "css") { const result = runCssff(p, msg.cssffDir); process.send({ ok: true, result }); return; } // CS:S via cssff.exe
-      raw = await parseRaw(p, { onProgress: (frac) => process.send({ type: "progress", frac }) });
-      raw.demPath = p;
-      if (msg.rawFile) { try { fs.writeFileSync(msg.rawFile, zlib.gzipSync(JSON.stringify(raw))); } catch {} }
+      const onProgress = (frac) => process.send({ type: "progress", frac });
+      let usedNative = false;
+      // FAST PATH: hand the file (even .bz2) straight to csgofast — it unzips natively and
+      // decodes in one pass, skipping the slow pure-JS bzip2 + the extra .dem on disk.
+      const isFile = fs.existsSync(msg.path) && fs.statSync(msg.path).isFile() && /\.(dem|bz2)$/i.test(msg.path);
+      if (msg.csgofast && fs.existsSync(msg.csgofast) && msg.rawFile && isFile) {
+        try {
+          await runCsgofast(msg.path, msg.csgofast, msg.rawFile, onProgress);
+          raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(msg.rawFile)));
+          raw.demPath = msg.path;
+          usedNative = true;
+        } catch (nativeErr) { raw = null; } // not CS:GO (e.g. CS:S) or error -> classic path below
+      }
+      if (!usedNative) {
+        const p = resolveDem(msg.path, opts.deleteBz2); // JS unzip / folder resolve
+        if (!fs.existsSync(p)) throw new Error("File not found: " + p);
+        if (demoKind(p) === "css") { const result = runCssff(p, msg.cssffDir); process.send({ ok: true, result }); return; }
+        if (msg.csgofast && fs.existsSync(msg.csgofast) && msg.rawFile) {
+          try { await runCsgofast(p, msg.csgofast, msg.rawFile, onProgress); raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(msg.rawFile))); raw.demPath = p; usedNative = true; } catch { raw = null; }
+        }
+        if (!usedNative) {
+          raw = await parseRaw(p, { onProgress });
+          raw.demPath = p;
+          if (msg.rawFile) { try { fs.writeFileSync(msg.rawFile, zlib.gzipSync(JSON.stringify(raw))); } catch {} }
+        }
+      }
     }
     const result = classify(raw, opts);
     result.demPath = raw.demPath || msg.path;

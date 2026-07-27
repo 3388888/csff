@@ -43,7 +43,8 @@
       "maps/**/*"
     ],
     "extraResources": [
-      { "from": "vendor/cssff", "to": "cssff" }
+      { "from": "vendor/cssff", "to": "cssff" },
+      { "from": "native/csgofast/csgofast.exe", "to": "csgofast/csgofast.exe" }
     ],
     "win": {
       "target": "nsis"
