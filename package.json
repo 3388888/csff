@@ -38,13 +38,18 @@
       "parse-worker.js",
       "settings.js",
       "vdm.js",
+      "cssffcfg.js",
+      "bspgeo.js",
+      "geo-worker.js",
       "renderer/**/*",
       "assets/**/*",
-      "maps/**/*"
+      "maps/**/*",
+      "maps3d/**/*"
     ],
     "extraResources": [
       { "from": "vendor/cssff", "to": "cssff" },
-      { "from": "native/csgofast/csgofast.exe", "to": "csgofast/csgofast.exe" }
+      { "from": "native/csgofast/csgofast.exe", "to": "csgofast/csgofast.exe" },
+      { "from": "native/cssfast/cssfast.exe", "to": "cssfast/cssfast.exe" }
     ],
     "win": {
       "target": "nsis"

@@ -23,8 +23,44 @@ function runCsgofast(demPath, exe, outGz, onProgress) {
   });
 }
 
-// CS:S demos (protocol 3 / cstrike) aren't supported by our parser — run the
-// bundled cssff.exe (native, works on v34) and parse its frag list instead.
+// CS:S demos: our own native parser (cssfast) handles every network protocol we've
+// seen — 7 (v34), 14/15 (v77 era) and 24+ (v93/v94). cssff.exe stays as a fallback.
+function runCssfast(demPath, exe, cacheFile) {
+  // cached result? (same cache folder as the CS:GO raws, keyed on the demo name)
+  if (cacheFile && fs.existsSync(cacheFile)) {
+    try {
+      const j = JSON.parse(zlib.gunzipSync(fs.readFileSync(cacheFile)).toString("utf8"));
+      if (j && j.frags && j.frags.length) return cssResult(j, demPath);
+    } catch {}
+  }
+  const tmp = (cacheFile || demPath) + ".tmp.json";
+  try {
+    execFileSync(exe, [demPath, tmp], { timeout: 300000, windowsHide: true, maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "ignore", "pipe"] });
+  } catch (e) {
+    // exit 3 = parsed but found no kills -> let the caller fall back to cssff
+    if (!fs.existsSync(tmp)) throw new Error("cssfast failed: " + ((e.stderr || "").toString().trim().split("\n").pop() || e.message));
+  }
+  let j;
+  try { j = JSON.parse(fs.readFileSync(tmp, "utf8")); } finally { try { fs.unlinkSync(tmp); } catch {} }
+  if (!j || !j.frags || !j.frags.length) throw new Error("cssfast found no frags");
+  if (cacheFile) { try { fs.writeFileSync(cacheFile, zlib.gzipSync(JSON.stringify(j))); } catch {} }
+  return cssResult(j, demPath);
+}
+
+function cssResult(j, demPath) {
+  // The position timeline stays in the cache file (it runs to megabytes); the renderer
+  // asks for slices through demo:frames, exactly like it does for CS:GO raws.
+  return {
+    css: true, mapName: j.mapName, tickrate: j.tickrate || 66, demPath,
+    hasPositions: !!(j.timeline && j.timeline.length),
+    netProtocol: j.netProtocol, players: j.players || [],
+    header: { serverName: j.serverName || "" },
+    frags: j.frags.map((f) => ({ tick: f.tick, endTick: f.endTick, player: f.player, team: f.team, desc: f.desc,
+      kills: f.kills, headshots: f.headshots, weapon: f.weapon, round: f.round, spanSec: f.spanSec })),
+  };
+}
+
+// Older fallback: the bundled cssff.exe (v34 only), parsed out of its console output.
 function demoKind(p) {
   const fd = fs.openSync(p, "r"); const b = Buffer.alloc(1072); fs.readSync(fd, b, 0, 1072, 0); fs.closeSync(fd);
   if (b.toString("latin1", 0, 7) !== "HL2DEMO") return "unknown";
@@ -72,6 +108,8 @@ process.on("message", async (msg) => {
     let raw = null;
     if (msg.rawFile && fs.existsSync(msg.rawFile)) {
       try { raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(msg.rawFile))); } catch { raw = null; }
+      // older caches were written without it, and classify needs the filename (tick hints)
+      if (raw && !raw.demPath) raw.demPath = msg.path;
     }
     if (!raw) {
       const onProgress = (frac) => process.send({ type: "progress", frac });
@@ -90,7 +128,18 @@ process.on("message", async (msg) => {
       if (!usedNative) {
         const p = resolveDem(msg.path, opts.deleteBz2); // JS unzip / folder resolve
         if (!fs.existsSync(p)) throw new Error("File not found: " + p);
-        if (demoKind(p) === "css") { const result = runCssff(p, msg.cssffDir); process.send({ ok: true, result }); return; }
+        if (demoKind(p) === "css") {
+          let result = null, err1 = null;
+          if (msg.cssfast && fs.existsSync(msg.cssfast)) {
+            try { result = runCssfast(p, msg.cssfast, msg.cssFile); } catch (e) { err1 = e; }
+          }
+          if (!result) {
+            try { result = runCssff(p, msg.cssffDir); }
+            catch (e) { throw new Error(err1 ? `${err1.message}; cssff: ${e.message}` : e.message); }
+          }
+          process.send({ ok: true, result });
+          return;
+        }
         if (msg.csgofast && fs.existsSync(msg.csgofast) && msg.rawFile) {
           try { await runCsgofast(p, msg.csgofast, msg.rawFile, onProgress); raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(msg.rawFile))); raw.demPath = p; usedNative = true; } catch { raw = null; }
         }

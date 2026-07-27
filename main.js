@@ -86,6 +86,27 @@ function rawKey(demoPath) {
   const base = path.basename(demoPath).replace(/\.dem(\.bz2)?$/i, "").replace(/[^\w.-]/g, "_");
   return `${base}_raw_v8.json.gz`;
 }
+// CS:S results live in the SAME cache folder as the CS:GO raws (they used to be written
+// next to the demo, which littered the demo folder and re-parsed on every open).
+function cssKey(demoPath) {
+  const base = path.basename(demoPath).replace(/\.dem(\.bz2)?$/i, "").replace(/[^\w.-]/g, "_");
+  // v2 = userinfo table decodes (roster names + slot→userID), so the timeline's uids
+  // line up with the roster; v1 caches have blank radar labels and must be redone.
+  return `${base}_css_v2.json.gz`;
+}
+
+// cssff_settings.ini — the rulebook the classifier obeys
+const cssffcfg = require("./cssffcfg");
+function cssffIniPath() {
+  return app.isPackaged ? path.join(process.resourcesPath, "cssff", "cssff_settings.ini")
+    : path.join(__dirname, "vendor", "cssff", "cssff_settings.ini");
+}
+function cssffConfig() { return cssffcfg.load(cssffIniPath()); }
+ipcMain.handle("cssff:config", () => {
+  const c = cssffConfig();
+  return { file: c.file, mtime: c.mtime, ok: c.ok, error: c.error || null, general: c.general, sections: c.sections };
+});
+ipcMain.handle("cssff:reveal", () => { shell.showItemInFolder(cssffIniPath()); return true; });
 
 // decode-once (cached raw) + classify with current settings, in a forked worker
 ipcMain.handle("demo:parse", (e, demoPath, opts) => new Promise((resolve, reject) => {
@@ -99,27 +120,67 @@ ipcMain.handle("demo:parse", (e, demoPath, opts) => new Promise((resolve, reject
   child.on("error", (err) => { clearTimeout(timer); reject(err); });
   const cssffDir = app.isPackaged ? path.join(process.resourcesPath, "cssff") : path.join(__dirname, "vendor", "cssff");
   const csgofast = app.isPackaged ? path.join(process.resourcesPath, "csgofast", "csgofast.exe") : path.join(__dirname, "native", "csgofast", "csgofast.exe");
-  child.send({ path: demoPath, opts, rawFile, cssffDir, csgofast });
+  const cssfast = app.isPackaged ? path.join(process.resourcesPath, "cssfast", "cssfast.exe") : path.join(__dirname, "native", "cssfast", "cssfast.exe");
+  // the ini is the rulebook: read it fresh for every parse so editing it takes effect
+  // on the next scan without restarting anything
+  opts = { ...(opts || {}), cssff: cssffConfig() };
+  const cssFile = path.join(cacheDir(), cssKey(demoPath));
+  child.send({ path: demoPath, opts, rawFile, cssFile, cssffDir, csgofast, cssfast });
 }));
 
 // fast preview: slice just the frames for one highlight straight from the cached raw
 // (no full re-classify). This is what makes the preview open quickly.
-ipcMain.handle("demo:frames", (e, demPath, watchTick, endTick, maxPreviewSec) => {
+ipcMain.handle("demo:frames", (e, demPath, watchTick, endTick, maxPreviewSec, round) => {
   try {
     const rawFile = path.join(cacheDir(), rawKey(demPath));
-    if (!fs.existsSync(rawFile)) return null;
+    if (!fs.existsSync(rawFile)) return cssFrames(demPath, watchTick, endTick, maxPreviewSec);
     const raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(rawFile)));
     const tickrate = raw.tickrate || 64;
     const end = Math.min(endTick, watchTick + Math.round(tickrate * (maxPreviewSec || 25)));
+    // who's already dead during this clip — the timeline keeps sampling corpses
+    const deathAt = {};
+    for (const k of raw.kills || []) {
+      const uid = k.victim && k.victim.uid;
+      if (uid == null) continue;
+      const inScope = round != null ? k.round === round : (k.killTick <= end && k.killTick >= watchTick - tickrate * 60);
+      if (!inScope) continue;
+      if (deathAt[uid] == null || k.killTick < deathAt[uid]) deathAt[uid] = k.killTick;
+    }
     const frames = [];
     for (const f of raw.timeline) {
       if (f.t < watchTick || f.t > end) continue;
-      frames.push({ tick: f.t, players: f.p.map((q) => ({ uid: q[0], x: q[1], y: q[2], yaw: q[3], team: q[4], z: q[5] == null ? null : q[5], name: (raw.roster[q[0]] || {}).name || "" })) });
+      frames.push({ tick: f.t, players: f.p.map((q) => ({ uid: q[0], x: q[1], y: q[2], yaw: q[3], team: q[4], z: q[5] == null ? null : q[5],
+        name: (raw.roster[q[0]] || {}).name || "", dead: deathAt[q[0]] != null && f.t >= deathAt[q[0]] ? deathAt[q[0]] : null })) });
     }
     const utils = (raw.utils || []).filter((u) => u.endTick >= watchTick && u.tick <= end);
     return { tickrate, watchTick, endTick: end, frames, utils };
   } catch { return null; }
 });
+
+// CS:S previews: same job as above, but the positions live in the cssfast cache. The
+// timeline format is identical ([uid, x, y, yaw, team, z] per sampled tick), so the radar
+// and the 3D view consume it unchanged.
+function cssFrames(demPath, watchTick, endTick, maxPreviewSec) {
+  try {
+    const f = path.join(cacheDir(), cssKey(demPath));
+    if (!fs.existsSync(f)) return null;
+    const j = JSON.parse(zlib.gunzipSync(fs.readFileSync(f)).toString("utf8"));
+    if (!j.timeline || !j.timeline.length) return null;
+    const tickrate = j.tickrate || 66;
+    const end = Math.min(endTick, watchTick + Math.round(tickrate * (maxPreviewSec || 25)));
+    const roster = j.roster || {};
+    const frames = [];
+    for (const fr of j.timeline) {
+      if (fr.t < watchTick || fr.t > end) continue;
+      frames.push({ tick: fr.t, players: fr.p.map((q) => ({ uid: q[0], x: q[1], y: q[2], yaw: q[3], team: q[4], z: q[5],
+        name: (roster[q[0]] || {}).name || "", dead: null })) });
+    }
+    if (!frames.length) return null;
+    // hand the whole roster over too: a POV demo may not carry the frag's author in
+    // this particular window, and the renderer still needs his uid to follow him
+    return { tickrate, watchTick, endTick: end, frames, utils: [], roster };
+  } catch { return null; }
+}
 
 // write a .vdm next to the demo covering all cool kills
 ipcMain.handle("vdm:write", (e, demPath, coolKills, opts) => {
@@ -208,18 +269,136 @@ ipcMain.handle("icons:get", () => {
   return iconCache;
 });
 
+// CS:S servers run renamed variants of maps we already have art for (de_cache_v34,
+// de_vertigo_sc, de_nuke_old_blue_ep, de_tuscan/de_toscan). When the exact name is
+// missing, fall back to the closest base name — most specific first — and tell the UI
+// it's an approximation so the user knows the overlay may be slightly off.
+function mapAliases(name) {
+  const out = [];
+  const swaps = [["tuscan", "toscan"], ["toscan", "tuscan"], ["cbble", "cobble"], ["cobble", "cbble"]];
+  const push = (n) => { if (n && n !== name && !out.includes(n)) out.push(n); };
+  const alts = (n) => { push(n); for (const [a, b] of swaps) if (n.includes(a)) push(n.replace(a, b)); };
+  alts(name);
+  const parts = name.split("_");
+  for (let n = parts.length - 1; n >= 2; n--) alts(parts.slice(0, n).join("_"));
+  return out;
+}
+
 // radar image (as data URL) + calibration for a map, or null if we don't have it
 let mapsCal = null;
 ipcMain.handle("maps:radar", (e, map) => {
+  const read = (m) => {
+    const cal = mapsCal && mapsCal[m];
+    if (!cal) return null;
+    try { return { cal, dataUrl: "data:image/png;base64," + fs.readFileSync(path.join(__dirname, "maps", m + ".png")).toString("base64") }; }
+    catch { return null; }
+  };
   try {
     const calFile = path.join(__dirname, "maps", "maps.json");
     if (!mapsCal) mapsCal = JSON.parse(fs.readFileSync(calFile, "utf8"));
     if (!mapsCal[map]) { try { mapsCal = JSON.parse(fs.readFileSync(calFile, "utf8")); } catch {} } // maps.json may have grown
-    const cal = mapsCal[map];
-    if (!cal) return null;
-    const png = fs.readFileSync(path.join(__dirname, "maps", map + ".png"));
-    return { cal, dataUrl: "data:image/png;base64," + png.toString("base64") };
+    const exact = read(map);
+    if (exact) return exact;
+    for (const alt of mapAliases(map)) {
+      const r = read(alt);
+      if (r) return { ...r, usedMap: alt };
+    }
+    return null;
   } catch { return null; }
+});
+
+// ---- 3D preview geometry (stripped out of the map's .bsp) ----
+// Lookup order: prebuilt maps3d/ that ships with the app -> the userData cache ->
+// strip it out of a .bsp we can find on disk (then cache it).
+const bspgeo = require("./bspgeo");
+function geoCacheDir() { const d = path.join(app.getPath("userData"), "geo"); fs.mkdirSync(d, { recursive: true }); return d; }
+
+function mapSearchDirs() {
+  const s = settings.load();
+  const dirs = [];
+  const add = (d) => { if (d && !dirs.includes(d)) dirs.push(d); };
+  add(s.mapsDir); add(s.mapsDir2);
+  for (const exe of [s.csgoExe, s.cssExe]) {
+    if (!exe) continue;
+    const base = path.dirname(exe);
+    for (const sub of ["csgo", "cstrike", "cc", "hl2"]) add(path.join(base, sub, "maps"));
+    add(path.join(base, "maps"));
+  }
+  try { add(path.join(app.getPath("home"), "Downloads", "custom maps")); } catch {}
+  try { add(path.join(app.getPath("desktop"), "ClassicCounter", "csgo", "maps")); } catch {}
+  return dirs.filter((d) => { try { return fs.statSync(d).isDirectory(); } catch { return false; } });
+}
+
+// <dir>/<map>.bsp | <map>.bsp.bz2, plus one level of workshop/<id>/ subfolders
+function findBspExact(map) {
+  for (const dir of mapSearchDirs()) {
+    for (const ext of [".bsp", ".bsp.bz2"]) {
+      const p = path.join(dir, map + ext);
+      try { if (fs.statSync(p).isFile()) return p; } catch {}
+    }
+    for (const sub of ["workshop", "download"]) {
+      let ids = []; try { ids = fs.readdirSync(path.join(dir, sub)); } catch { continue; }
+      for (const id of ids.slice(0, 400)) {
+        for (const ext of [".bsp", ".bsp.bz2"]) {
+          const p = path.join(dir, sub, id, map + ext);
+          try { if (fs.statSync(p).isFile()) return p; } catch {}
+        }
+      }
+    }
+  }
+  return null;
+}
+// exact file first; only then the renamed-variant fallbacks (see mapAliases)
+function findBsp(map) {
+  const hit = findBspExact(map);
+  if (hit) return hit;
+  for (const alt of mapAliases(map)) {
+    const p = findBspExact(alt);
+    if (p) return p;
+  }
+  return null;
+}
+
+function stripGeo(bsp, out) {
+  return new Promise((resolve) => {
+    const child = fork(path.join(__dirname, "geo-worker.js"), [], { stdio: ["inherit", "inherit", "inherit", "ipc"] });
+    const timer = setTimeout(() => { try { child.kill(); } catch {} resolve({ ok: false, error: "geometry strip timed out" }); }, 90 * 1000);
+    child.on("message", (m) => { clearTimeout(timer); try { child.kill(); } catch {} resolve(m); });
+    child.on("error", (err) => { clearTimeout(timer); resolve({ ok: false, error: err.message }); });
+    child.send({ bsp, out });
+  });
+}
+
+const geoInflight = new Map();
+ipcMain.handle("maps:geo", async (e, map) => {
+  const name = String(map || "").toLowerCase().replace(/[^\w.-]/g, "");
+  if (!name) return { ok: false, error: "no map name" };
+  const prebuilt = path.join(__dirname, "maps3d", name + ".geo.gz");
+  const cached = path.join(geoCacheDir(), name + ".geo.gz");
+  for (const f of [prebuilt, cached]) {
+    try { if (fs.existsSync(f)) return { ok: true, data: zlib.gunzipSync(fs.readFileSync(f)), source: f }; } catch {}
+  }
+  if (geoInflight.has(name)) return geoInflight.get(name);
+  const job = (async () => {
+    const bsp = findBsp(name);
+    if (!bsp) return { ok: false, error: `no .bsp found for ${name} — point Settings ▸ Maps folder at your maps directory` };
+    const used = path.basename(bsp).replace(/\.bsp(\.bz2)?$/i, "").toLowerCase();
+    const r = await stripGeo(bsp, cached);
+    if (!r.ok) return { ok: false, error: `${path.basename(bsp)}: ${r.error}` };
+    try { return { ok: true, data: zlib.gunzipSync(fs.readFileSync(cached)), source: bsp, triCount: r.triCount, stripped: true, usedMap: used !== name ? used : undefined }; }
+    catch (err) { return { ok: false, error: err.message }; }
+  })().finally(() => geoInflight.delete(name));
+  geoInflight.set(name, job);
+  return job;
+});
+
+// does this map have (or could it get) 3D geometry? cheap check for the UI
+ipcMain.handle("maps:geoAvailable", (e, map) => {
+  const name = String(map || "").toLowerCase().replace(/[^\w.-]/g, "");
+  if (!name) return false;
+  if (fs.existsSync(path.join(__dirname, "maps3d", name + ".geo.gz"))) return true;
+  if (fs.existsSync(path.join(geoCacheDir(), name + ".geo.gz"))) return true;
+  return !!findBsp(name);
 });
 
 // Try to hand the demo to an ALREADY-RUNNING game over its netconsole (requires the
@@ -241,5 +420,22 @@ async function launchGame(exe, demPath, port) {
   try { const child = spawn(exe, ["-novid", "-insecure", ...(port ? ["-netconport", String(port)] : []), "+playdemo", demPath], { detached: true, stdio: "ignore", cwd: path.dirname(exe) }); child.unref(); return { ok: true }; }
   catch (err) { return { ok: false, error: err.message }; }
 }
-ipcMain.handle("csgo:launch", (e, demPath) => { const s = settings.load(); return launchGame(s.csgoExe, demPath, s.csgoNetconPort); });
-ipcMain.handle("css:launch", (e, demPath) => { const s = settings.load(); return launchGame(s.cssExe, demPath, s.cssNetconPort); });
+// Nobody should have to go find a port number: if it isn't set we pick one, save it, and
+// launch the game with -netconport ourselves. Every launch after that can jump into the
+// running game instead of starting it again.
+function ensureNetconPort(key, fallback) {
+  const s = settings.load();
+  const cur = String(s[key] || "").trim();
+  if (cur) return cur;
+  const port = String(fallback);
+  try { settings.save({ [key]: port }); } catch {}
+  return port;
+}
+ipcMain.handle("csgo:launch", (e, demPath) => {
+  const s = settings.load();
+  return launchGame(s.csgoExe, demPath, ensureNetconPort("csgoNetconPort", 2121));
+});
+ipcMain.handle("css:launch", (e, demPath) => {
+  const s = settings.load();
+  return launchGame(s.cssExe, demPath, ensureNetconPort("cssNetconPort", 2122));
+});

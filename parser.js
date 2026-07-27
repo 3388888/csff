@@ -14,12 +14,18 @@
 
 const fs = require("fs");
 const { DemoFile } = require("demofile");
+const cssffcfg = require("./cssffcfg");
 
 const DEFAULTS = {
   prerollSec: 1.0, postSec: 1.0, previewFps: 32,
   longRangeM: 25, flickMinDeg: 22,
   bhopMinSpeed: 260, boostVz: 250, streakForSmokeBlind: 3,
   multikillGapSec: 8, rngMaxChance: 0.25,
+  clutchMaxSec: 45,        // hard ceiling on a clutch's first->last kill span
+  clutchMaxGapSec: 20,     // ...and between consecutive kills (hunting the last man takes longer
+                           //    than a spray transfer, so clutches get their own gap)
+  focusWindowSec: 15,      // how close a highlight must be to a tick named in the filename
+  focusKeepScore: 110,     // ...unless it scores at least this (genuinely insane -> never hidden)
   runContinueSpeed: 200, runMinJumps: 5, runMinPeak: 300, runMinAir: 45, runMaxSec: 12,
   edgebugMinDmg: 20, nearbyRadius: 1000, maxPreviewSec: 25, maxHighlights: 80,
   weights: null, // {tag: number} overrides for TAGW
@@ -82,6 +88,26 @@ const r1 = (n) => (n == null ? 0 : Math.round(n * 10) / 10);
 const safe = (fn) => { try { return fn(); } catch { return undefined; } };
 const dist3 = (a, b) => (a && b ? Math.round(Math.hypot(a.x - b.x, a.y - b.y, a.z - b.z)) : null);
 const multiTag = (n) => (n >= 5 ? "ace" : n === 4 ? "quad" : n === 3 ? "triple" : null);
+
+// Demos are often named after the tick worth watching ("unnBHop1_124400_agency.dem",
+// "SAYKIRY_78000_fast4k_31000+double.dem"). Pull those ticks out so we can focus on them.
+// Dates, clock times and map-name years must NOT be mistaken for ticks, so the map name and
+// any yyyy-mm-dd_hhmm stamp are stripped first and 1900..2100 is ignored.
+function tickHints(demPath, mapName, maxTick) {
+  const base = String(demPath || "").split(/[\\/]/).pop().replace(/\.(dem|bz2)$/gi, "");
+  let s = base.toLowerCase();
+  if (mapName) s = s.split(String(mapName).toLowerCase()).join("_");   // drop "de_cache_2014_og" etc
+  s = s.replace(/\d{4}-\d{2}-\d{2}([_-]\d{3,4})?/g, "_");              // pug_2026-07-05_1032
+  const hints = [];
+  for (const m of s.matchAll(/\d{3,7}/g)) {
+    const n = +m[0];
+    if (n >= 1900 && n <= 2100) continue;                              // a year, not a tick
+    if (n < 500) continue;                                             // too small to be a useful tick
+    if (maxTick && n > maxTick) continue;                              // past the end of the demo
+    if (!hints.includes(n)) hints.push(n);
+  }
+  return hints;
+}
 
 // =====================================================================
 //  parseRaw — decode the demo once
@@ -352,6 +378,31 @@ function classify(raw, cfg = {}) {
     },
     multiExtra: FRAG.multiExtra,
   };
+  // ---- cssff_settings.ini is the rulebook ---------------------------------
+  // Everything the ini covers (max times, min headshots, required special kills, which
+  // frag types tick, distances, the "slow stationary" allowance) comes from there, per
+  // weapon category. The built-in table above is only a fallback for a missing file.
+  const ini = cfg.cssff && cfg.cssff.ok ? cfg.cssff : null;
+  const ruleCache = {};
+  function rulesFor(cat) {
+    const key = cat || "_";
+    if (ruleCache[key]) return ruleCache[key];
+    const r = cssffcfg.rules(ini, cat);
+    if (!ini) { // no ini: keep the legacy built-in numbers (and any Settings overrides)
+      for (const n of [3, 4, 5]) r.maxTime[n] = F.multiMax[n][cat] ?? F.multiMax[n].default;
+      r.extraPerSpecial = { 3: 0, 4: 0, 5: 0 };
+      r.minHs[3] = (cat === "Snipers" || cat === "Scout" || cat === "AutoSnipers") ? 0 : 2;
+      r.noscope.dist = F.noscopeDist[cat] ?? 2000;
+      r.noscope.hsMod = F.noscopeHsMod[cat] ?? 0.5;
+      r.jump.dist = F.jumpDist[cat] ?? F.jumpDist.default;
+      r.jump.hsMod = F.jumpHsMod;
+      r.flick.dist = F.flickDist[cat] ?? F.flickDist.default;
+      r.wallbang.tick = true; r.wallbang.requireTwo = false;
+    }
+    return (ruleCache[key] = r);
+  }
+  const GEN = rulesFor(null);
+
   const tickrate = raw.tickrate, rounds = raw.score.rounds;
   const prerollTicks = Math.round(tickrate * cfg.prerollSec);
   const postTicks = Math.round(tickrate * cfg.postSec);
@@ -362,6 +413,18 @@ function classify(raw, cfg = {}) {
   const posByUid = {};
   for (const f of raw.timeline) for (const q of f.p) (posByUid[q[0]] = posByUid[q[0]] || []).push({ t: f.t, x: q[1], y: q[2], yaw: q[3] });
   function movedInWindow(uid, a, b) { const arr = posByUid[uid]; if (!arr) return 999; let d = 0, prev = null; for (const p of arr) { if (p.t < a || p.t > b) continue; if (prev) d += Math.hypot(p.x - prev.x, p.y - prev.y); prev = p; } return prev ? d : 999; }
+  // how far the player strayed from where they started (for the ini's slow_Nk_max_range)
+  function posRangeInWindow(uid, a, b) {
+    const arr = posByUid[uid];
+    if (!arr) return 1e9;
+    let first = null, max = 0;
+    for (const p of arr) {
+      if (p.t < a || p.t > b) continue;
+      if (!first) { first = p; continue; }
+      max = Math.max(max, Math.hypot(p.x - first.x, p.y - first.y));
+    }
+    return first ? max : 1e9;
+  }
   function spinInWindow(uid, a, b) { const arr = posByUid[uid]; if (!arr) return 0; let s = 0, prev = null; for (const p of arr) { if (p.t < a || p.t > b || p.yaw == null) continue; if (prev != null) s += Math.abs(angleDiff(p.yaw, prev)); prev = p.yaw; } return Math.round(s); }
 
   // WARMUP / DM detection: in a real round a victim dies at most once and a round has at
@@ -381,32 +444,52 @@ function classify(raw, cfg = {}) {
     k._refrag = !!refragRound[k.round];
   }
 
-  function sliceFrames(a, b) {
+  // when each player died in each round — the timeline keeps sampling corpses/spectators,
+  // which is why dead players used to hang around the preview in odd places
+  const deathAt = {};
+  for (const k of raw.kills) {
+    const key = k.round + "|" + (k.victim && k.victim.uid);
+    if (deathAt[key] == null || k.killTick < deathAt[key]) deathAt[key] = k.killTick;
+  }
+  function sliceFrames(a, b, round) {
     const out = [];
     for (const f of raw.timeline) {
       if (f.t < a || f.t > b) continue;
-      out.push({ tick: f.t, players: f.p.map((q) => ({ uid: q[0], x: q[1], y: q[2], yaw: q[3], team: q[4], z: q[5] == null ? null : q[5], name: (raw.roster[q[0]] || {}).name || "" })) });
+      out.push({ tick: f.t, players: f.p.map((q) => {
+        const dt = deathAt[round + "|" + q[0]];
+        return { uid: q[0], x: q[1], y: q[2], yaw: q[3], team: q[4], z: q[5] == null ? null : q[5],
+          name: (raw.roster[q[0]] || {}).name || "", dead: dt != null && f.t >= dt ? dt : null };
+      }) });
     }
     return out;
   }
-  function trickTags(k, roundTotal) {
+  function trickTags(k, grp) {
     const t = k.telemetry, tags = [], cat = wcat(k.weapon), sniper = SNIPERS.has(k.weapon), d = k.distUnits || 0;
-    // NO-SCOPE (snipers): must be at real distance (cssff). HS lowers the bar.
-    if (k.noscope && sniper) {
-      const minD = (F.noscopeDist[cat] ?? 2000) * (k.headshot ? (F.noscopeHsMod[cat] ?? 0.5) : 1);
+    const r = rulesFor(cat);
+    // NO-SCOPE (snipers): must be at real distance. HS / wallbang lower the bar.
+    if (k.noscope && sniper && r.noscope.tick) {
+      const minD = r.noscope.dist * (k.headshot ? r.noscope.hsMod : 1) * (k.penetrated > 0 ? r.noscope.wbMod : 1);
       if (d >= minD) tags.push(t.airborneAtKill ? "jump_noscope" : "noscope");
     }
-    // JUMPSHOT: airborne kill at distance (snipers any distance). Not double-counted with jump_noscope.
-    if (t.airborneAtKill && !(k.noscope && sniper)) {
-      const minJ = (F.jumpDist[cat] ?? F.jumpDist.default) * (k.headshot ? F.jumpHsMod : 1);
+    // JUMPSHOT: airborne kill at distance (Snipers set the distance to 0 = any).
+    if (t.airborneAtKill && r.jump.tick && !(k.noscope && sniper)) {
+      const minJ = r.jump.dist * (k.headshot ? r.jump.hsMod : 1) * (k.penetrated > 0 ? r.jump.wbMod : 1);
       if (d >= minJ) tags.push("jumpshot");
     }
-    // FLICK: fast wide turn onto a target at distance
-    if (t.flickDeg >= cfg.flickMinDeg && d >= (F.flickDist[cat] ?? F.flickDist.default)) tags.push(k.headshot ? "flick_hs" : "flick");
+    // FLICK: fast wide turn onto a target at distance (angle modifier scales the threshold)
+    if (r.flick.tick && t.flickDeg >= cfg.flickMinDeg * r.flick.angleMod && d >= r.flick.dist && (!r.flick.hsOnly || k.headshot)) {
+      tags.push(k.headshot ? "flick_hs" : "flick");
+    }
     if (k._spin >= 300) tags.push("spin");
-    if (k.penetrated > 0 && k.headshot) tags.push("wallbang"); // HS wallbangs only (cssff)
-    if (k.smoke) tags.push("smoke_kill");
-    if (k.blind) tags.push("blind_kill");
+    // WALLBANG: per category, optionally headshot-only and optionally only when a second
+    // wallbang by the same player lands within the pair window (wallbang_require_two)
+    if (k.penetrated > 0 && r.wallbang.tick && (!r.wallbang.hsOnly || k.headshot)) {
+      const paired = !r.wallbang.requireTwo || (grp || []).some((o) => o !== k && o.penetrated > 0 &&
+        Math.abs(o.killTick - k.killTick) / tickrate <= r.wallbang.pairWindow && (!r.wallbang.hsOnly || o.headshot));
+      if (paired) tags.push("wallbang");
+    }
+    if (k.smoke && r.utilKills) tags.push("smoke_kill");
+    if (k.blind && r.utilKills) tags.push("blind_kill");
     if (k.airshot && d >= 400) tags.push("airshot"); // point-blank airshots aren't impressive
     // long-range: scoped snipers need a much bigger distance (that's their job); noscopes &
     // other weapons use the general gate. Separate distance requirements for scoped vs noscoped.
@@ -462,51 +545,110 @@ function classify(raw, cfg = {}) {
 
   // group kills by round + attacker
   const groups = new Map();
-  for (const k of raw.kills) { if (warmupRound[k.round]) continue; const key = k.round + "|" + (k.attacker.steamId || k.attacker.name); if (!groups.has(key)) groups.set(key, []); groups.get(key).push(k); }
+  const isBot = (p) => !p || !p.steamId || p.steamId === "0" || /^BOT\b/i.test(p.name || "");
+  for (const k of raw.kills) {
+    if (warmupRound[k.round]) continue;
+    if (!GEN.vsBots && isBot(k.victim)) continue;   // tick_frags_vs_bots=0
+    if (!GEN.byBots && isBot(k.attacker)) continue; // tick_frags_by_bots=0
+    const key = k.round + "|" + (k.attacker.steamId || k.attacker.name);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(k);
+  }
   for (const grp of groups.values()) {
     grp.sort((a, b) => a.killTick - b.killTick);
-    for (const k of grp) k._tags = trickTags(k, grp.length);
+    for (const k of grp) k._tags = trickTags(k, grp);
     const used = new Set();
     const solo = grp.filter((k) => k.teamAlive === 1);
+    // A clutch used to ignore timing entirely, which is why cards showed up with kills
+    // minutes apart. It now obeys the same two ceilings as everything else: the total
+    // span (clutchMaxSec) and the gap between consecutive kills (multikillGapSec).
     if (solo.length >= 2 && solo[solo.length - 1].enemyAliveAfter === 0) {
-      const x = solo[0].enemyAliveAfter + 1; const tagSet = new Set(["clutch"]); // a clutch is a clutch (1vX) regardless of timing
-      for (const k of solo) { for (const t of k._tags) tagSet.add(t); used.add(k); }
-      highlights.push(makeHighlight(solo, [...tagSet], { clutchX: x }));
+      const span = (solo[solo.length - 1].killTick - solo[0].killTick) / tickrate;
+      let maxGap = 0;
+      for (let i = 1; i < solo.length; i++) maxGap = Math.max(maxGap, (solo[i].killTick - solo[i - 1].killTick) / tickrate);
+      // cssff has no notion of a clutch, so a clutch has to clear the same multikill law
+      // as any other burst of that size (2-kill clutches are held to the 3k window).
+      // The Settings clutch caps are only an extra outer bound on top of that.
+      const iniOK = solo.length >= 3 ? multiQualifies(solo) : (() => {
+        const r = rulesFor(wcat(solo[0].weapon));
+        const specials = solo.filter((k) => k._special).length;
+        const maxT = r.maxTime[3] + specials * (r.extraPerSpecial[3] || 0);
+        return maxT < 0 || span <= maxT;
+      })();
+      if (iniOK && span <= (cfg.clutchMaxSec ?? 45) && maxGap <= (cfg.clutchMaxGapSec ?? 20)) {
+        const x = solo[0].enemyAliveAfter + 1; const tagSet = new Set(["clutch"]);
+        for (const k of solo) { for (const t of k._tags) tagSet.add(t); used.add(k); }
+        highlights.push(makeHighlight(solo, [...tagSet], { clutchX: x }));
+      }
     }
     const rest = grp.filter((k) => !used.has(k));
     // group into candidate bursts (kills chained within a loose link), then a burst only
     // "ticks" as a 3k/4k/5k if its span fits the tight, weapon-specific max time (+ special extends)
     let chain = [];
+    // does this exact run of kills tick as a multikill under the configured ceilings?
+    // Straight out of the ini, per weapon category:
+    //   Nk_max_time (+ Nk_special_kill_extra_max_time per special kill, negative = no limit)
+    //   Nk_min_headshots (ignored when the burst contains a special kill)
+    //   Nk_must_include_special_kill, tick_Nks
+    //   tick_slow_stationary_Nks + slow_Nk_max_range — a burst may ignore the clock if the
+    //   shooter never left that radius
+    function multiQualifies(sub) {
+      const n = Math.min(sub.length, 5);
+      // category = the weapon MOST kills used (ties -> the strictest / smallest time).
+      // Prevents one stray shotgun/knife kill from making a whole rifle burst "lenient".
+      const cnt = {}; for (const k of sub) { const c = wcat(k.weapon); cnt[c] = (cnt[c] || 0) + 1; }
+      const cat = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a] || rulesFor(a).maxTime[n] - rulesFor(b).maxTime[n])[0];
+      const r = rulesFor(cat);
+      if (!r.tick[n]) return false;
+      const specials = sub.filter((k) => k._special).length;
+      if (r.mustSpecial[n] && specials === 0) return false;
+      const hs = sub.filter((k) => k.headshot).length;
+      if (hs < r.minHs[n] && specials === 0) return false;
+      const span = (sub[sub.length - 1].killTick - sub[0].killTick) / tickrate;
+      const maxT = r.maxTime[n] + specials * (r.extraPerSpecial[n] || 0);
+      if (maxT < 0 || span <= maxT) return true;
+      // slow stationary allowance
+      const range = r.slow[n];
+      return range > 0 && posRangeInWindow(sub[0].attacker.uid, sub[0].killTick, sub[sub.length - 1].killTick) <= range;
+    }
     const flush = () => {
-      if (chain.length >= 3) {
-        const n = Math.min(chain.length, 5);
-        const mt = (c) => F.multiMax[n][c] ?? F.multiMax[n].default;
-        // category = the weapon MOST kills used (ties -> the strictest / smallest time).
-        // Prevents one stray shotgun/knife kill from making a whole rifle burst "lenient".
-        const cnt = {}; for (const k of chain) { const c = wcat(k.weapon); cnt[c] = (cnt[c] || 0) + 1; }
-        const cat = Object.keys(cnt).sort((a, b) => cnt[b] - cnt[a] || mt(a) - mt(b))[0];
-        const specials = chain.filter((k) => k._special).length;
-        const isTroll = cat === "Knife"; // knife/nade -> lenient window so troll multis can be detected
-        // the configured "Nk max sec" is a HARD ceiling — nothing shows longer than what you set.
-        // 4k/5k expose one field, so it governs every weapon; 3k has per-weapon fields. Weapon
-        // type can only make it STRICTER, never longer. No time bonus.
-        const maxT = n === 3 ? mt(cat) : (isTroll ? mt("Knife") : F.multiMax[n].default);
-        const span = (chain[chain.length - 1].killTick - chain[0].killTick) / tickrate;
-        const hs = chain.filter((k) => k.headshot).length;
-        const minHs = (cat === "Snipers" || cat === "Scout" || cat === "AutoSnipers") ? 0 : (n === 3 ? 2 : 0);
-        if (span <= maxT && (hs >= minHs || specials > 0)) { // needs HS unless it contains a special kill
-          const tagSet = new Set([multiTag(chain.length)]);
-          for (const k of chain) { for (const t of k._tags) tagSet.add(t); used.add(k); }
-          highlights.push(makeHighlight(chain.slice(), [...tagSet]));
+      // Take the BIGGEST consecutive run inside the chain that fits its ceiling. Without
+      // this, one late kill dragging the chain over the limit would throw away the fast
+      // 3k sitting inside it.
+      for (let size = chain.length; size >= 3 && chain.length >= 3; size--) {
+        for (let i = 0; i + size <= chain.length; i++) {
+          const sub = chain.slice(i, i + size);
+          if (!multiQualifies(sub)) continue;
+          const tagSet = new Set([multiTag(sub.length)]);
+          for (const k of sub) { for (const t of k._tags) tagSet.add(t); used.add(k); }
+          highlights.push(makeHighlight(sub, [...tagSet]));
+          chain = [];
+          return;
         }
       }
       chain = [];
     };
-    for (const k of rest) { if (chain.length && (k.killTick - chain[chain.length - 1].killTick) / tickrate > 5) flush(); chain.push(k); }
+    // link kills into a burst using the configured gap (this used to be hard-coded to 5s,
+    // so the "max seconds between kills" setting did nothing)
+    const linkSec = cfg.multikillGapSec ?? 8;
+    for (const k of rest) { if (chain.length && (k.killTick - chain[chain.length - 1].killTick) / tickrate > linkSec) flush(); chain.push(k); }
     flush();
     const byTick = new Map();
     for (const k of grp) { if (used.has(k)) continue; if (!byTick.has(k.killTick)) byTick.set(k.killTick, []); byTick.get(k.killTick).push(k); }
-    for (const [, arr] of byTick) if (arr.length >= 2 && arr.some((k) => k.penetrated > 0)) { const tagSet = new Set(["collateral"]); for (const k of arr) { for (const t of k._tags) tagSet.add(t); used.add(k); } highlights.push(makeHighlight(arr, [...tagSet])); }
+    // collaterals — cssff's "doubles / triples / quadros / pentas": one bullet, N kills.
+    // tick_doubles..tick_pentas and <size>_min_headshots (waived by a special kill) apply.
+    for (const [, arr] of byTick) {
+      if (arr.length < 2 || !arr.some((k) => k.penetrated > 0)) continue;
+      const size = Math.min(arr.length, 5);
+      const cat = wcat(arr[0].weapon), rc = rulesFor(cat).collat;
+      if (!rc.tick[size]) continue;
+      const hs = arr.filter((k) => k.headshot).length;
+      const specials = arr.filter((k) => k._special).length;
+      if (hs < (rc.minHs[size] || 0) && !(rc.specialIgnoresHs[size] && specials > 0)) continue;
+      const tagSet = new Set(["collateral"]);
+      for (const k of arr) { for (const t of k._tags) tagSet.add(t); used.add(k); }
+      highlights.push(makeHighlight(arr, [...tagSet]));
+    }
     for (const k of grp) { if (used.has(k)) continue; if (k._tags.some((t) => QUALIFY_TAGS.has(t))) highlights.push(makeHighlight([k], k._tags)); }
   }
 
@@ -584,7 +726,34 @@ function classify(raw, cfg = {}) {
       kills: fk ? [{ killTick: fk.killTick, weapon: fk.weapon, headshot: fk.headshot, victim: fk.victim, telemetry: fk.telemetry, shot: fk.shot, tags: [] }] : [] });
   }
 
-  highlights.sort((a, b) => b.coolScore - a.coolScore || a.watchTick - b.watchTick);
+  // ---- filename tick focus -------------------------------------------------
+  // If the file is named after a tick, that's the moment the recorder cared about
+  // (the unnBHop demos are a pile of failed attempts plus the one that landed). Mark
+  // everything else as off-focus so the UI can hide it — except anything genuinely
+  // insane, which is never hidden.
+  const hints = cfg.focusNamedTick === false ? [] : tickHints(raw.demPath, raw.mapName, (raw.header && raw.header.playbackTicks) || 0);
+  if (hints.length) {
+    const win = Math.round(tickrate * (cfg.focusWindowSec ?? 15));
+    const keepScore = cfg.focusKeepScore ?? 85;
+    for (const h of highlights) {
+      let near = null;
+      for (const t of hints) {
+        // "near" = the named tick falls inside the clip, or within the window of it
+        if (t >= h.watchTick - win && t <= h.endTick + win) { near = t; break; }
+      }
+      // What survives away from the named tick: real frags only. Movement clips are
+      // exactly the noise these demos are full of (dozens of bhop/surf/edgebug attempts
+      // before the one that landed), so they never survive off-focus no matter the score.
+      const insane = h.type !== "movement" &&
+        (h.coolScore >= keepScore || h.tags.some((tg) => tg === "ace" || tg === "quad") || (h.clutchX || 0) >= 3);
+      h.focusTick = near;
+      h.offFocus = !near && !insane;
+      h.keptAnyway = !near && insane;
+    }
+  }
+
+  // focused clips first, then by score — so the named moment can never be cut by the cap
+  highlights.sort((a, b) => (a.offFocus ? 1 : 0) - (b.offFocus ? 1 : 0) || b.coolScore - a.coolScore || a.watchTick - b.watchTick);
   const capped = highlights.slice(0, cfg.maxHighlights || 80);
   const maxPrev = Math.round(tickrate * (cfg.maxPreviewSec || 25));
   const rawUtils = raw.utils || [];
@@ -592,7 +761,7 @@ function classify(raw, cfg = {}) {
     h.tickrate = tickrate;
     const end = Math.min(h.endTick, h.watchTick + maxPrev); // cap every clip length
     const activeUtils = rawUtils.filter((u) => u.endTick >= h.watchTick && u.tick <= end);
-    h.preview = { tickrate, watchTick: h.watchTick, endTick: end, frames: sliceFrames(h.watchTick, end), utils: activeUtils };
+    h.preview = { tickrate, watchTick: h.watchTick, endTick: end, frames: sliceFrames(h.watchTick, end, h.round), utils: activeUtils };
   }
 
   // scoreboard: per-round kills + derived stats
@@ -604,9 +773,9 @@ function classify(raw, cfg = {}) {
     .map((p) => ({ ...p, hs: p.kills > 0 ? Math.round((p.headshots / p.kills) * 100) : 0, adr: Math.round(p.damage / rounds), kd: +(p.kills / Math.max(p.deaths, 1)).toFixed(2), roundKills: perRound.get(p.steamId) || new Array(rounds).fill(0), roundHs: perRoundHs.get(p.steamId) || new Array(rounds).fill(0) }))
     .sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
 
-  return { header: raw.header, mapName: raw.mapName, tickrate, score: raw.score, roundWinners: raw.roundWinners, players, highlights };
+  return { header: raw.header, mapName: raw.mapName, tickrate, score: raw.score, roundWinners: raw.roundWinners, players, highlights, tickHints: hints };
 }
 
 function parseDemo(demPath, cfg = {}) { return parseRaw(demPath, cfg).then((raw) => classify(raw, cfg)); }
 
-module.exports = { parseRaw, classify, parseDemo, DEFAULTS, TAGW };
+module.exports = { parseRaw, classify, parseDemo, tickHints, DEFAULTS, TAGW };

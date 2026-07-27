@@ -12,6 +12,11 @@ const DEFAULTS = {
   flickMinDeg: 22,      // yaw snap to count as a flick
   bhopMinSpeed: 260,    // airborne speed to count as a bhop kill
   multikillGapSec: 8,   // max seconds between kills to still count as a multikill
+  clutchMaxSec: 45,     // max seconds a clutch may span (first -> last kill)
+  clutchMaxGapSec: 20,  // max seconds between two kills of a clutch
+  focusNamedTick: true, // demo named after a tick -> focus on that moment, hide the rest
+  focusWindowSec: 15,   // how close a clip must be to the named tick to count as "the moment"
+  focusKeepScore: 110,   // ...unless it scores at least this (insane moments are never hidden)
   rngMaxChance: 0.25,   // single-shot hit-chance at/below this = an "rng" kill
   runMinJumps: 5,       // jumps a bhop run must chain
   runMinPeak: 300,      // top speed a bhop run must reach
@@ -20,6 +25,11 @@ const DEFAULTS = {
   nearbyRadius: 1000,   // close-range radius for "outnumbered"
   edgebugMinDmg: 20,    // min fall damage an edgebug must save (unless it leads to a kill)
   maxPreviewSec: 25,    // cap movement preview length
+  mapsDir: "",          // where the .bsp files live (for the 3D preview); auto-detected from csgoExe if empty
+  mapsDir2: "",         // extra maps folder (e.g. downloaded custom maps)
+  prefer3d: true,       // open previews in 3D when the map's geometry is available
+  cam3d: "chase",       // chase | pov | orbit | top
+  cutRoofs: true,       // hide geometry above the action so you can see inside buildings
   weights: {},          // per-tag point overrides for scoring (empty = defaults)
   cssExe: "",           // path to css hl2.exe / launcher for "Open in CS:S"
   csgoNetconPort: "",   // if set, "Open in CS:GO" jumps in the running game (launch it with -netconport)
