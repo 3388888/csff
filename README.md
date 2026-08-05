@@ -147,6 +147,14 @@ package.cmd          # zip the portable build for a GitHub release (what install
 
 Caches live in `%APPDATA%\CSGO Demo Highlights\` (`cache/`, `aggregate_v2.json.gz`, `favorites.json`, `settings.json`).
 
+## Acknowledgements
+
+- **cssff** — the CS:S demo frag-finder bundled in `vendor/cssff/`. All CS:S frag detection
+  builds on it and follows its rulebook (`cssff_settings.ini`). Full credit to its original
+  author; it's redistributed here as-is for convenience.
+- **[demoinfocs-golang](https://github.com/markus-wa/demoinfocs-golang)** by Markus Walther —
+  the CS:GO / CS2 demo decoder both the desktop app and the console edition use.
+
 ## License
 
-MIT
+MIT (this project's own code). Bundled third-party tools keep their own terms.

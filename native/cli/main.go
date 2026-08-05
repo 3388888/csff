@@ -49,27 +49,68 @@ type highlight struct {
 
 var snipers = map[string]bool{"awp": true, "ssg08": true, "scar20": true, "g3sg1": true}
 
-func main() {
-	fmt.Println("\n  CSGO Demo Highlights  -  console edition\n")
-	in := bufio.NewReader(os.Stdin)
+// user-tunable, persisted to %LOCALAPPDATA%\cdh-cli\settings.json
+type config struct {
+	Folder, GameExe               string
+	MinScore, MinKills, LongRangeM, Top int
+}
 
-	folder := strings.Join(os.Args[1:], " ")
-	if folder == "" {
-		folder = ask(in, "  Demo folder (drag it in or paste the path): ")
+var cfg config
+
+func loadConfig() {
+	cfg = config{MinKills: 1, LongRangeM: 25, Top: 60}
+	if b, err := os.ReadFile(cfgFile()); err == nil {
+		json.Unmarshal(b, &cfg)
 	}
-	folder = strings.Trim(strings.TrimSpace(folder), "\"")
+	if cfg.Top < 1 {
+		cfg.Top = 60
+	}
+	if cfg.MinKills < 1 {
+		cfg.MinKills = 1
+	}
+	if cfg.LongRangeM < 1 {
+		cfg.LongRangeM = 25
+	}
+}
+func saveConfig() {
+	os.MkdirAll(dataDir(), 0755)
+	if b, err := json.Marshal(cfg); err == nil {
+		os.WriteFile(cfgFile(), b, 0644)
+	}
+}
+func cfgFile() string { return filepath.Join(dataDir(), "settings.json") }
+
+func main() {
+	fmt.Print("\n  CSGO Demo Highlights  -  console edition\n\n")
+	in := bufio.NewReader(os.Stdin)
+	loadConfig()
+
+	folder := strings.Trim(strings.TrimSpace(strings.Join(os.Args[1:], " ")), "\"")
+	if folder == "" {
+		folder = cfg.Folder
+	}
+	if folder == "" {
+		folder = strings.Trim(strings.TrimSpace(ask(in, "  Demo folder (drag it in or paste the path): ")), "\"")
+	}
 	if folder == "" {
 		return
 	}
+	if folder != cfg.Folder {
+		cfg.Folder = folder
+		saveConfig()
+	}
 
+	hls := scan(in, folder)
+	mainMenu(in, folder, hls)
+}
+
+func scan(in *bufio.Reader, folder string) []highlight {
 	demos := findDemos(folder)
 	if len(demos) == 0 {
 		fmt.Println("  No .dem / .dem.bz2 files found there.")
-		pause(in)
-		return
+		return nil
 	}
 	fmt.Printf("  Scanning %d demo(s)...\n", len(demos))
-
 	var hls []highlight
 	cached := 0
 	for i, d := range demos {
@@ -84,13 +125,146 @@ func main() {
 		hls = append(hls, rank(d, ks)...)
 	}
 	fmt.Printf("\r  Done. %d highlights from %d demos (%d from cache).%20s\n\n", len(hls), len(demos), cached, "")
-
 	sort.Slice(hls, func(i, j int) bool { return hls[i].score > hls[j].score })
-	if len(hls) > 100 {
-		hls = hls[:100]
+	return hls
+}
+
+// apply the min-score / min-kills settings
+func visible(hls []highlight) []highlight {
+	var o []highlight
+	for _, h := range hls {
+		if h.score >= cfg.MinScore && len(h.kills) >= cfg.MinKills {
+			o = append(o, h)
+		}
 	}
-	printList(hls)
-	menu(in, hls)
+	return o
+}
+func topN(hls []highlight, n int) []highlight {
+	if n > 0 && len(hls) > n {
+		return hls[:n]
+	}
+	return hls
+}
+
+func mainMenu(in *bufio.Reader, folder string, hls []highlight) {
+	for {
+		shown := topN(visible(hls), cfg.Top)
+		printList(shown)
+		c := strings.ToLower(strings.TrimSpace(ask(in, "  [#] open in CS   (f)ind   (s)ettings   (d)ownloads   (r)escan   (q)uit : ")))
+		switch c {
+		case "q", "":
+			return
+		case "f":
+			fragFinder(in, hls)
+		case "s":
+			settingsMenu(in)
+		case "d":
+			downloads(in)
+		case "r":
+			hls = scan(in, folder)
+		default:
+			if n, err := strconv.Atoi(c); err == nil && n >= 1 && n <= len(shown) {
+				openInCS(in, shown[n-1])
+			} else {
+				fmt.Println("  ?")
+			}
+		}
+	}
+}
+
+// Frag finder: filter the scanned highlights by weapon / type / player / distance.
+func fragFinder(in *bufio.Reader, hls []highlight) {
+	fmt.Println("\n  Frag finder - leave any blank to skip it")
+	wep := strings.ToLower(strings.TrimSpace(ask(in, "  weapon (ak47 / awp / deagle / ...): ")))
+	typ := strings.ToLower(strings.TrimSpace(ask(in, "  type (ace / 4k / 3k / clutch / noscope / wallbang / airborne / long-range): ")))
+	who := strings.ToLower(strings.TrimSpace(ask(in, "  player name contains: ")))
+	minD := atoi(ask(in, "  min distance (m): "))
+
+	var res []highlight
+	for _, h := range visible(hls) {
+		if who != "" && !strings.Contains(strings.ToLower(h.player), who) {
+			continue
+		}
+		if wep != "" {
+			ok := false
+			for _, k := range h.kills {
+				if strings.Contains(k.Weapon, wep) {
+					ok = true
+				}
+			}
+			if !ok {
+				continue
+			}
+		}
+		if typ != "" && !matchType(h, typ) {
+			continue
+		}
+		if minD > 0 {
+			md := 0
+			for _, k := range h.kills {
+				if k.DistM > md {
+					md = k.DistM
+				}
+			}
+			if md < minD {
+				continue
+			}
+		}
+		res = append(res, h)
+	}
+	fmt.Printf("\n  %d match(es):\n", len(res))
+	res = topN(res, 200)
+	printList(res)
+	c := ask(in, "  # to open in CS, or Enter to go back: ")
+	if n, err := strconv.Atoi(strings.TrimSpace(c)); err == nil && n >= 1 && n <= len(res) {
+		openInCS(in, res[n-1])
+	}
+}
+
+func matchType(h highlight, typ string) bool {
+	n := len(h.kills)
+	switch typ {
+	case "ace", "5k":
+		return n >= 5
+	case "4k":
+		return n == 4
+	case "3k":
+		return n == 3
+	}
+	for _, t := range h.tags {
+		if strings.Contains(strings.ToLower(t), typ) {
+			return true
+		}
+	}
+	return false
+}
+
+func settingsMenu(in *bufio.Reader) {
+	for {
+		fmt.Println("\n  Settings (frag detection / display):")
+		fmt.Printf("   [1] Min score to show ........ %d\n", cfg.MinScore)
+		fmt.Printf("   [2] Min kills (1 = show all) . %d\n", cfg.MinKills)
+		fmt.Printf("   [3] Long-range distance (m) .. %d\n", cfg.LongRangeM)
+		fmt.Printf("   [4] How many to list ......... %d\n", cfg.Top)
+		fmt.Printf("   [5] Game exe ................. %s\n", orNone(cfg.GameExe))
+		c := strings.TrimSpace(ask(in, "  number to change, Enter to go back: "))
+		switch c {
+		case "1":
+			cfg.MinScore = atoi(ask(in, "  min score: "))
+		case "2":
+			cfg.MinKills = maxi(1, atoi(ask(in, "  min kills: ")))
+		case "3":
+			cfg.LongRangeM = maxi(1, atoi(ask(in, "  long-range distance (m): ")))
+		case "4":
+			cfg.Top = maxi(1, atoi(ask(in, "  how many to list: ")))
+		case "5":
+			cfg.GameExe = strings.Trim(strings.TrimSpace(ask(in, "  path to csgo.exe / cs2.exe: ")), "\"")
+		default:
+			saveConfig()
+			return
+		}
+		saveConfig()
+	}
 }
 
 // ------------------------------------------------------------------ decode (+ cache)
@@ -242,7 +416,7 @@ func rank(demoPath string, kills []kill) []highlight {
 			}
 			if k.DistM > 15 {
 				score += min(k.DistM, 40)
-				if k.DistM >= 25 {
+				if k.DistM >= cfg.LongRangeM {
 					tags = append(tags, "long-range")
 				}
 			}
@@ -276,25 +450,6 @@ func printList(hls []highlight) {
 			trim(strings.Join(keys(weps), "/")+"  "+strings.Join(h.tags, " "), 30))
 	}
 	fmt.Println()
-}
-
-func menu(in *bufio.Reader, hls []highlight) {
-	for {
-		c := ask(in, "  # to open in CS  |  (d)ownloads  |  (q)uit : ")
-		switch strings.ToLower(strings.TrimSpace(c)) {
-		case "q", "":
-			return
-		case "d":
-			downloads(in)
-		default:
-			n, err := strconv.Atoi(strings.TrimSpace(c))
-			if err != nil || n < 1 || n > len(hls) {
-				fmt.Println("  ?")
-				continue
-			}
-			openInCS(in, hls[n-1])
-		}
-	}
 }
 
 // ------------------------------------------------------------------ open in game (writes a .vdm next to the demo)
@@ -424,18 +579,15 @@ func findDemos(root string) []string {
 }
 
 func gameExe(in *bufio.Reader) string {
-	cfg := filepath.Join(dataDir(), "gameexe.txt")
-	if b, err := os.ReadFile(cfg); err == nil {
-		if p := strings.TrimSpace(string(b)); p != "" && fileExists(p) {
-			return p
-		}
+	if cfg.GameExe != "" && fileExists(cfg.GameExe) {
+		return cfg.GameExe
 	}
 	p := strings.Trim(strings.TrimSpace(ask(in, "  Path to csgo.exe / cs2.exe (Enter to skip and get the console command): ")), "\"")
 	if p == "" || !fileExists(p) {
 		return ""
 	}
-	os.MkdirAll(dataDir(), 0755)
-	os.WriteFile(cfg, []byte(p), 0644)
+	cfg.GameExe = p
+	saveConfig()
 	return p
 }
 
@@ -490,6 +642,19 @@ func min(a, b int) int {
 }
 func isDir(p string) bool      { i, err := os.Stat(p); return err == nil && i.IsDir() }
 func fileExists(p string) bool { i, err := os.Stat(p); return err == nil && !i.IsDir() }
+func atoi(s string) int        { n, _ := strconv.Atoi(strings.TrimSpace(s)); return n }
+func maxi(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+func orNone(s string) string {
+	if s == "" {
+		return "(not set)"
+	}
+	return s
+}
 
 func run(exe string, args ...string) {
 	c := exec.Command(exe, args...)
