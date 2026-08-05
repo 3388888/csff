@@ -13,7 +13,6 @@ import (
 	"hash/crc32"
 	"io"
 	"math"
-	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -663,25 +662,14 @@ func run(exe string, args ...string) {
 }
 
 func getZip(url, dest string) error {
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
+	// download via Windows' built-in curl instead of Go's net/http, so the binary doesn't
+	// carry the whole crypto/tls stack (several MB) just for the occasional add-on grab.
+	tmp := filepath.Join(os.TempDir(), fmt.Sprintf("addon-%08x.zip", crc32.ChecksumIEEE([]byte(url))))
+	defer os.Remove(tmp)
+	if err := exec.Command("curl", "-L", "--fail", "-o", tmp, url).Run(); err != nil {
+		return fmt.Errorf("download failed (needs curl, built into Win10+): %v", err)
 	}
-	defer resp.Body.Close()
-	if resp.StatusCode != 200 {
-		return fmt.Errorf("HTTP %d", resp.StatusCode)
-	}
-	tmp, err := os.CreateTemp("", "addon-*.zip")
-	if err != nil {
-		return err
-	}
-	defer os.Remove(tmp.Name())
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
-		tmp.Close()
-		return err
-	}
-	tmp.Close()
-	r, err := zip.OpenReader(tmp.Name())
+	r, err := zip.OpenReader(tmp)
 	if err != nil {
 		return err
 	}
