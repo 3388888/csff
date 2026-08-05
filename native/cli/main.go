@@ -8,7 +8,9 @@ import (
 	"archive/zip"
 	"bufio"
 	"compress/bzip2"
+	"encoding/json"
 	"fmt"
+	"hash/crc32"
 	"io"
 	"math"
 	"net/http"
@@ -25,13 +27,13 @@ import (
 )
 
 type kill struct {
-	round, tick                  int
-	attacker, victim             string
-	attackerID                   uint64
-	weapon                       string
-	headshot, noscope, wallbang  bool
-	airborne, blind, smoke       bool
-	distM, teamAlive, enemyAlive int
+	Round, Tick                  int
+	Attacker, Victim             string
+	AttackerID                   uint64
+	Weapon                       string
+	Headshot, Noscope, Wallbang  bool
+	Airborne, Blind, Smoke       bool
+	DistM, TeamAlive, EnemyAlive int
 }
 
 type highlight struct {
@@ -69,15 +71,19 @@ func main() {
 	fmt.Printf("  Scanning %d demo(s)...\n", len(demos))
 
 	var hls []highlight
+	cached := 0
 	for i, d := range demos {
 		fmt.Printf("\r  [%d/%d] %-50.50s", i+1, len(demos), filepath.Base(d))
-		ks, err := parseDemo(d)
+		ks, hit, err := killsFor(d)
 		if err != nil {
 			continue
 		}
+		if hit {
+			cached++
+		}
 		hls = append(hls, rank(d, ks)...)
 	}
-	fmt.Printf("\r  Done. %d highlights from %d demos.%30s\n\n", len(hls), len(demos), "")
+	fmt.Printf("\r  Done. %d highlights from %d demos (%d from cache).%20s\n\n", len(hls), len(demos), cached, "")
 
 	sort.Slice(hls, func(i, j int) bool { return hls[i].score > hls[j].score })
 	if len(hls) > 100 {
@@ -87,7 +93,39 @@ func main() {
 	menu(in, hls)
 }
 
-// ------------------------------------------------------------------ decode
+// ------------------------------------------------------------------ decode (+ cache)
+type demoCache struct {
+	Mtime, Size int64
+	Kills       []kill
+}
+
+func cacheDir() string { return filepath.Join(dataDir(), "cache") }
+func cacheFile(path string) string {
+	return filepath.Join(cacheDir(), fmt.Sprintf("%08x.json", crc32.ChecksumIEEE([]byte(path))))
+}
+
+// decode a demo, but reuse a cached result when the file hasn't changed (same mtime+size).
+// This is what makes a second run near-instant.
+func killsFor(path string) ([]kill, bool, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return nil, false, err
+	}
+	cf := cacheFile(path)
+	if b, e := os.ReadFile(cf); e == nil {
+		var c demoCache
+		if json.Unmarshal(b, &c) == nil && c.Mtime == info.ModTime().UnixNano() && c.Size == info.Size() {
+			return c.Kills, true, nil
+		}
+	}
+	ks, _ := parseDemo(path) // cache the result even if it errored (e.g. a non-CS:GO demo):
+	os.MkdirAll(cacheDir(), 0755) // an empty result cached means we never re-try that file.
+	if b, e := json.Marshal(demoCache{info.ModTime().UnixNano(), info.Size(), ks}); e == nil {
+		os.WriteFile(cf, b, 0644)
+	}
+	return ks, false, nil
+}
+
 func parseDemo(path string) (kills []kill, err error) {
 	defer func() { // a corrupt / non-CS:GO demo can panic demoinfocs — skip it, don't crash
 		if r := recover(); r != nil {
@@ -135,11 +173,11 @@ func parseDemo(path string) (kills []kill, err error) {
 			wep = normWep(e.Weapon.String())
 		}
 		kills = append(kills, kill{
-			round: round, tick: p.GameState().IngameTick(),
-			attacker: A.Name, victim: V.Name, attackerID: A.SteamID64, weapon: wep,
-			headshot: e.IsHeadshot, noscope: e.NoScope, wallbang: e.PenetratedObjects > 0,
-			airborne: A.IsAirborne(), blind: V.IsBlinded(), smoke: e.ThroughSmoke,
-			distM: distM, teamAlive: aliveA, enemyAlive: aliveE,
+			Round: round, Tick: p.GameState().IngameTick(),
+			Attacker: A.Name, Victim: V.Name, AttackerID: A.SteamID64, Weapon: wep,
+			Headshot: e.IsHeadshot, Noscope: e.NoScope, Wallbang: e.PenetratedObjects > 0,
+			Airborne: A.IsAirborne(), Blind: V.IsBlinded(), Smoke: e.ThroughSmoke,
+			DistM: distM, TeamAlive: aliveA, EnemyAlive: aliveE,
 		})
 	})
 	return kills, p.ParseToEnd()
@@ -158,14 +196,14 @@ func rank(demoPath string, kills []kill) []highlight {
 	// group by round + attacker
 	groups := map[string][]kill{}
 	for _, k := range kills {
-		key := strconv.Itoa(k.round) + "|" + strconv.FormatUint(k.attackerID, 10)
+		key := strconv.Itoa(k.Round) + "|" + strconv.FormatUint(k.AttackerID, 10)
 		groups[key] = append(groups[key], k)
 	}
 	var out []highlight
 	base := map[int]int{1: 8, 2: 22, 3: 45, 4: 70}
 	for _, g := range groups {
 		n := len(g)
-		h := highlight{demo: filepath.Base(demoPath), demoPath: demoPath, player: g[0].attacker, playerID: g[0].attackerID, round: g[0].round}
+		h := highlight{demo: filepath.Base(demoPath), demoPath: demoPath, player: g[0].Attacker, playerID: g[0].AttackerID, round: g[0].Round}
 		score := base[n]
 		if n >= 5 {
 			score = 100
@@ -177,43 +215,41 @@ func rank(demoPath string, kills []kill) []highlight {
 				tags = []string{"ACE"}
 			}
 		}
-		clutch := g[0].teamAlive <= 1 && g[0].enemyAlive >= 2
+		clutch := g[0].TeamAlive <= 1 && g[0].EnemyAlive >= 2
 		if clutch {
-			score += g[0].enemyAlive * 12
-			tags = append(tags, fmt.Sprintf("clutch 1v%d", g[0].enemyAlive))
+			score += g[0].EnemyAlive * 12
+			tags = append(tags, fmt.Sprintf("clutch 1v%d", g[0].EnemyAlive))
 		}
-		weps := map[string]bool{}
 		for _, k := range g {
-			weps[k.weapon] = true
-			if k.noscope && snipers[k.weapon] {
+			if k.Noscope && snipers[k.Weapon] {
 				score += 35
 				tags = append(tags, "noscope")
 			}
-			if k.airborne {
+			if k.Airborne {
 				score += 18
 				tags = append(tags, "airborne")
 			}
-			if k.wallbang {
+			if k.Wallbang {
 				score += 15
 				tags = append(tags, "wallbang")
 			}
-			if k.smoke {
+			if k.Smoke {
 				score += 12
 				tags = append(tags, "smoke")
 			}
-			if k.headshot {
+			if k.Headshot {
 				score += 4
 			}
-			if k.distM > 15 {
-				score += min(k.distM, 40)
-				if k.distM >= 25 {
+			if k.DistM > 15 {
+				score += min(k.DistM, 40)
+				if k.DistM >= 25 {
 					tags = append(tags, "long-range")
 				}
 			}
 		}
 		h.kills = g
-		h.watchTick = g[0].tick - 128 // ~2s preroll @64t (in-game tick)
-		h.kill = g[0].tick
+		h.watchTick = g[0].Tick - 128 // ~2s preroll @64t (in-game tick)
+		h.kill = g[0].Tick
 		h.score = score
 		h.tags = dedup(tags)
 		out = append(out, h)
@@ -234,7 +270,7 @@ func printList(hls []highlight) {
 		}
 		weps := map[string]bool{}
 		for _, k := range h.kills {
-			weps[k.weapon] = true
+			weps[k.Weapon] = true
 		}
 		fmt.Printf("  %-4d %-6d %-22.22s %-16s r%-5d %s\n", i+1, h.score, h.player, what, h.round+1,
 			trim(strings.Join(keys(weps), "/")+"  "+strings.Join(h.tags, " "), 30))
@@ -263,12 +299,12 @@ func menu(in *bufio.Reader, hls []highlight) {
 
 // ------------------------------------------------------------------ open in game (writes a .vdm next to the demo)
 func openInCS(in *bufio.Reader, h highlight) {
-	dem := h.demoPath
-	if strings.HasSuffix(strings.ToLower(dem), ".bz2") {
-		fmt.Println("  (this demo is .bz2 — extract it to a .dem first; CS can't play compressed demos)")
+	demPath, err := playable(h.demoPath) // CS can't read .bz2 -> extract to .dem
+	if err != nil {
+		fmt.Println("  couldn't prepare the demo:", err)
 		return
 	}
-	vdm := strings.TrimSuffix(dem, filepath.Ext(dem)) + ".vdm"
+	vdm := strings.TrimSuffix(demPath, filepath.Ext(demPath)) + ".vdm"
 	if err := os.WriteFile(vdm, []byte(buildVDM(h)), 0644); err != nil {
 		fmt.Println("  couldn't write .vdm:", err)
 		return
@@ -276,11 +312,37 @@ func openInCS(in *bufio.Reader, h highlight) {
 	fmt.Printf("  Wrote %s\n", filepath.Base(vdm))
 	exe := gameExe(in)
 	if exe == "" {
-		fmt.Printf("  In CS's console:  playdemo \"%s\"   (the .vdm auto-jumps to the clip)\n", dem)
+		fmt.Printf("  In CS's console:  playdemo \"%s\"   (the .vdm auto-jumps to the clip)\n", demPath)
 		return
 	}
-	run(exe, "-novid", "-insecure", "+playdemo", dem)
+	run(exe, "-novid", "-insecure", "+playdemo", demPath)
 	fmt.Println("  Launching CS... it'll skip to the clip and pause (press P to play).")
+}
+
+// extract a .bz2 to the sibling .dem (once) so CS can play it; return the playable path
+func playable(path string) (string, error) {
+	if !strings.HasSuffix(strings.ToLower(path), ".bz2") {
+		return path, nil
+	}
+	out := path[:len(path)-4]
+	if fileExists(out) {
+		return out, nil
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	w, err := os.Create(out)
+	if err != nil {
+		return "", err
+	}
+	defer w.Close()
+	fmt.Println("  extracting .bz2 (first time only)...")
+	if _, err := io.Copy(w, bzip2.NewReader(f)); err != nil {
+		return "", err
+	}
+	return out, nil
 }
 
 func buildVDM(h highlight) string {
