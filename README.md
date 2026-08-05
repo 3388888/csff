@@ -6,9 +6,38 @@ and lets you watch each one in a built-in 2D/3D preview or jump the real game st
 
 Works on **CS:GO / Source 1 (`HL2DEMO`) demos**. CS:S demos are supported for frag detection.
 
+Comes in two flavours:
+
+- **Console edition** — one tiny `.exe`, runs entirely in the terminal (like `cssff`). Scan a
+  folder, get a ranked list, jump the game to any clip. Zero install. Optional radar/3D previews
+  are add-ons you download from its menu. Best if you just want the list fast.
+- **Desktop app** — the full GUI with the 2D radar and 3D map previews built in.
+
 ---
 
-## Install (easy way — no build tools)
+## Console edition (`CSGO-Highlights-Console.exe`)
+
+Download the single exe from [Releases](https://github.com/3388888/cc-demo-highlights/releases)
+and run it — nothing to install.
+
+```text
+CSGO-Highlights-Console.exe  "D:\path\to\your\demos"
+```
+
+(or just double-click it and paste the folder when it asks). It scans, prints the top highlights
+ranked by score, and gives you a menu:
+
+- **type a number** → writes a `.vdm` next to that demo and launches CS to the clip (paused; press **P**), or prints the `playdemo` console command if you haven't set your game exe.
+- **d** → download optional add-ons (radar images for a 2D preview, stripped `.bsp` geometry for 3D).
+- **q** → quit.
+
+The core (scan + rank + list + jump-to-clip) needs **no downloads** — the previews are the only add-ons.
+
+Build it yourself: `cd native/cli && go build -o ../../CSGO-Highlights-Console.exe .`
+
+---
+
+## Desktop app — install (easy way — no build tools)
 
 1. Download **`install.cmd`** from this repo (green **Code** button, or open the file and hit **Raw** → save).
 2. Double-click it.
