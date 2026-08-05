@@ -105,11 +105,14 @@ type trick struct {
 	SteamId *string `json:"steamId"`
 	Team    int     `json:"team"`
 	Tick    int     `json:"tick"`
-	Kind     string `json:"kind"`
-	FallVel  int    `json:"fallVel"`
-	Spd      int    `json:"spd"`
-	DurTicks int    `json:"durTicks,omitempty"`
-	Dist     int    `json:"dist,omitempty"`
+	Kind     string  `json:"kind"`
+	FallVel  int     `json:"fallVel"`
+	Spd      int     `json:"spd"`
+	DurTicks int     `json:"durTicks,omitempty"`
+	Dist     int     `json:"dist,omitempty"`
+	X        float64 `json:"x,omitempty"` // perch location (pixelsurf: vetted vs map brushes)
+	Y        float64 `json:"y,omitempty"`
+	Z        float64 `json:"z,omitempty"`
 }
 type util struct {
 	Kind    string  `json:"kind"`
@@ -355,6 +358,7 @@ func main() {
 	runStates := map[int]*runState{}
 	trickPrevs := map[int]*trickPrev{}
 	surfStates := map[int]*surfState{}
+	pixelStates := map[int]*pixelState{}
 	var flashes []flashEv // recent flash detonations, for flashboost detection
 	fbPrev := map[int]int{} // previous speed per player (flashboost spike detection)
 	roster := map[string]rosterEnt{}
@@ -599,6 +603,7 @@ func main() {
 
 			trackSurf(surfStates, uid, pl, s, ct, tickrate, &tricks)
 			trackFlashboost(fbPrev, uid, pl, s, ct, tickrate, flashes, &tricks)
+			trackPixelsurf(pixelStates, uid, pl, s, ct, tickrate, &tricks)
 
 			if fr != nil {
 				var yawVal interface{} = int(math.Round(yaw))
@@ -916,4 +921,65 @@ func trackSurf(states map[int]*surfState, uid int, pl *common.Player, s sample, 
 				Tick: st.startTick, Kind: "surf", FallVel: st.maxSpeed, Spd: s.spd, DurTicks: dur, Dist: dist})
 		}
 	}
+}
+
+// pixelsurf: the player is perched on a sliver of geometry too small for the engine to
+// call it ground, so he reads as AIRBORNE while hanging motionless at wall height instead
+// of falling. Airborne + no horizontal speed + no vertical movement, held for half a
+// second, is physically impossible any other way. Two lookalikes survive this test and are
+// filtered later against the map geometry (see pixelsurf.js): standing on a ladder, and
+// treading water — which is why the perch location (x/y/z) is emitted with the candidate.
+const (
+	pixelMaxSpeed = 45   // u/s horizontal — "flush to the wall", not moving
+	pixelMaxVz    = 20   // u/s vertical — not falling, not rising
+	pixelMinSec   = 0.5  // held at least this long (kills the jump-apex false positive)
+	pixelMaxDrift = 72.0 // units of horizontal travel allowed across the whole hold
+)
+
+type pixelState struct {
+	on                     bool
+	startTick              int
+	ticks                  int
+	startX, startY, startZ float64
+	drift                  float64
+	maxSpd                 int
+	idx                    int // index into tricks once emitted, so it can keep growing
+}
+
+func trackPixelsurf(states map[int]*pixelState, uid int, pl *common.Player, s sample, ct, tickrate int, tricks *[]trick) {
+	st := states[uid]
+	if st == nil {
+		st = &pixelState{idx: -1}
+		states[uid] = st
+	}
+	if !s.onGround && s.spd <= pixelMaxSpeed && abs(s.vz) <= pixelMaxVz {
+		if !st.on {
+			*st = pixelState{on: true, startTick: ct, startX: s.x, startY: s.y, startZ: s.z, idx: -1}
+		}
+		st.ticks++
+		if s.spd > st.maxSpd {
+			st.maxSpd = s.spd
+		}
+		if d := math.Hypot(s.x-st.startX, s.y-st.startY); d > st.drift {
+			st.drift = d
+		}
+		if st.drift > pixelMaxDrift {
+			st.on = false // drifting: that's a glide/surf, not a perch
+			return
+		}
+		// Emit as soon as it qualifies and keep the duration up to date afterwards: the
+		// hold often ends with the player being shot, and a dead player leaves the sample
+		// loop entirely — waiting for a clean end would lose exactly the good ones.
+		if st.ticks >= int(math.Round(float64(tickrate)*pixelMinSec)) {
+			if st.idx < 0 {
+				st.idx = len(*tricks)
+				*tricks = append(*tricks, trick{Uid: uid, Name: pl.Name, SteamId: steamStr(pl.SteamID64), Team: int(pl.Team),
+					Tick: st.startTick, Kind: "pixelsurf", Spd: st.maxSpd,
+					X: r1(st.startX), Y: r1(st.startY), Z: r1(st.startZ)})
+			}
+			(*tricks)[st.idx].DurTicks = st.ticks
+		}
+		return
+	}
+	st.on = false
 }

@@ -20,6 +20,8 @@ contextBridge.exposeInMainWorld("api", {
   hasMapGeo: (map) => ipcRenderer.invoke("maps:geoAvailable", map),
   getIcons: () => ipcRenderer.invoke("icons:get"),
   getDefaultWeights: () => ipcRenderer.invoke("weights:defaults"),
+  cpuSample: (ms) => ipcRenderer.invoke("cpu:sample", ms),
+  pixelsurfPending: (paths) => ipcRenderer.invoke("demos:pixelsurfPending", paths),
   loadAggregate: () => ipcRenderer.invoke("aggregate:load"),
   saveAggregate: (data) => ipcRenderer.invoke("aggregate:save", data),
   clearAggregate: () => ipcRenderer.invoke("aggregate:clear"),

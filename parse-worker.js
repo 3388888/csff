@@ -7,6 +7,23 @@ const zlib = require("zlib");
 const { execFileSync, spawn } = require("child_process");
 const seekBzip = require("seek-bzip");
 const { parseRaw, classify } = require("./parser");
+const pixelsurf = require("./pixelsurf");
+
+// Airborne + no speed + not falling = perched on a pixel... or standing on a ladder / in
+// water. The map's collision brushes settle it (see pixelsurf.js). Never let this fail a
+// parse: worst case we just drop the candidates.
+function confirmPixelsurfs(raw, msg) {
+  try {
+    if (!raw || !raw.tricks || !raw.tricks.some((t) => t.kind === "pixelsurf")) return;
+    const meta = pixelsurf.loadMeta(raw.mapName, { cacheDir: msg.geoDir, dirs: msg.mapDirs });
+    const rep = pixelsurf.confirm(raw, meta);
+    if (rep.candidates) {
+      process.send({ type: "log", text: `pixelsurf: ${rep.kept}/${rep.candidates} confirmed` +
+        (rep.ladder ? `, ${rep.ladder} on ladders` : "") + (rep.water ? `, ${rep.water} in water` : "") +
+        (rep.unverified ? `, ${rep.unverified} unverified (no .bsp for ${raw.mapName})` : "") });
+    }
+  } catch {}
+}
 
 // native Go decoder (csgofast) — same raw JSON, ~3x faster than the Node decode.
 // Writes the gzipped raw straight to the cache file; falls back to Node if absent.
@@ -103,11 +120,20 @@ function resolveDem(p, deleteBz2) {
 }
 
 process.on("message", async (msg) => {
+  // quick job: extract a .bz2 -> .dem off the main process (bzip2 decode is CPU-heavy and
+  // was freezing the UI when done inline). Handled here and returned immediately.
+  if (msg && msg.extract) {
+    try { fs.writeFileSync(msg.out, seekBzip.decode(fs.readFileSync(msg.in))); process.send({ ok: true }); }
+    catch (e) { process.send({ ok: false, error: e.message }); }
+    return;
+  }
   try {
     const opts = msg.opts || {};
     let raw = null;
-    if (msg.rawFile && fs.existsSync(msg.rawFile)) {
-      try { raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(msg.rawFile))); } catch { raw = null; }
+    // read the newest existing cache (rawRead); decode only when there is none. writes go
+    // to rawWrite (current format), so a re-decode upgrades an old cache in place.
+    if (msg.rawRead && fs.existsSync(msg.rawRead)) {
+      try { raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(msg.rawRead))); } catch { raw = null; }
       // older caches were written without it, and classify needs the filename (tick hints)
       if (raw && !raw.demPath) raw.demPath = msg.path;
     }
@@ -117,10 +143,10 @@ process.on("message", async (msg) => {
       // FAST PATH: hand the file (even .bz2) straight to csgofast — it unzips natively and
       // decodes in one pass, skipping the slow pure-JS bzip2 + the extra .dem on disk.
       const isFile = fs.existsSync(msg.path) && fs.statSync(msg.path).isFile() && /\.(dem|bz2)$/i.test(msg.path);
-      if (msg.csgofast && fs.existsSync(msg.csgofast) && msg.rawFile && isFile) {
+      if (msg.csgofast && fs.existsSync(msg.csgofast) && msg.rawWrite && isFile) {
         try {
-          await runCsgofast(msg.path, msg.csgofast, msg.rawFile, onProgress);
-          raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(msg.rawFile)));
+          await runCsgofast(msg.path, msg.csgofast, msg.rawWrite, onProgress);
+          raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(msg.rawWrite)));
           raw.demPath = msg.path;
           usedNative = true;
         } catch (nativeErr) { raw = null; } // not CS:GO (e.g. CS:S) or error -> classic path below
@@ -140,16 +166,18 @@ process.on("message", async (msg) => {
           process.send({ ok: true, result });
           return;
         }
-        if (msg.csgofast && fs.existsSync(msg.csgofast) && msg.rawFile) {
-          try { await runCsgofast(p, msg.csgofast, msg.rawFile, onProgress); raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(msg.rawFile))); raw.demPath = p; usedNative = true; } catch { raw = null; }
+        if (msg.csgofast && fs.existsSync(msg.csgofast) && msg.rawWrite) {
+          try { await runCsgofast(p, msg.csgofast, msg.rawWrite, onProgress); raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(msg.rawWrite))); raw.demPath = p; usedNative = true; } catch { raw = null; }
         }
         if (!usedNative) {
           raw = await parseRaw(p, { onProgress });
           raw.demPath = p;
-          if (msg.rawFile) { try { fs.writeFileSync(msg.rawFile, zlib.gzipSync(JSON.stringify(raw))); } catch {} }
+          if (msg.rawWrite) { try { fs.writeFileSync(msg.rawWrite, zlib.gzipSync(JSON.stringify(raw))); } catch {} }
         }
       }
     }
+    // vet pixelsurf candidates against the map's ladder/water brushes before classify
+    confirmPixelsurfs(raw, msg);
     const result = classify(raw, opts);
     result.demPath = raw.demPath || msg.path;
     process.send({ ok: true, result });

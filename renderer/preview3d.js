@@ -243,7 +243,9 @@ void main() {
     gl.bindBuffer(gl.ARRAY_BUFFER, S.buf.mat);
     gl.bufferData(gl.ARRAY_BUFFER, mv, gl.STATIC_DRAW);
     S.tris = geo.tris;
-    S.geo = { bounds: geo.bounds, play: geo.play, tris: geo.tris };
+    // keep the triangle positions on the CPU too, for camera-collision ray tests.
+    // int16 world units, 9 per triangle (3 verts × xyz). Skip on huge maps (perf).
+    S.geo = { bounds: geo.bounds, play: geo.play, tris: geo.tris, pos: geo.tris <= 120000 ? geo.pos : null };
   }
 
   // Loads (and caches) the stripped geometry for a map. Returns false if we have none.
@@ -292,15 +294,18 @@ void main() {
     const tick = Math.round(lerp(f0.tick, f1.tick, t));
     const dt = Math.max(1, (f1.tick - f0.tick)) / (S.view.tickrate || 64);
     const players = [];
-    for (const a of f0.players) {
-      const b = f1.players.find((q) => q.uid === a.uid) || a;
+    // Iterate the DESTINATION frame: only players still sampled at f1 are alive there.
+    // A player present in f0 but gone from f1 has died/left, so they must NOT be drawn
+    // (otherwise a corpse lingers frozen at the death spot — the "dead people shown" bug).
+    for (const b of f1.players) {
+      const a = f0.players.find((q) => q.uid === b.uid) || b;
       const x = lerp(a.x, b.x, t), y = lerp(a.y, b.y, t);
       const z = a.z == null || b.z == null ? (a.z != null ? a.z : b.z) : lerp(a.z, b.z, t);
       const yaw = a.yaw == null ? b.yaw : lerp(a.yaw, shortAngle(a.yaw, b.yaw == null ? a.yaw : b.yaw), t);
       const speed = Math.hypot(b.x - a.x, b.y - a.y) / dt;
       // walk phase advances with distance travelled, so it never slides
-      const phase = (S.phase[a.uid] = ((S.phase[a.uid] || 0) + speed * dt * t * 0.012) % 1);
-      players.push({ uid: a.uid, name: a.name, team: a.team, x, y, z, yaw,
+      const phase = (S.phase[b.uid] = ((S.phase[b.uid] || 0) + speed * dt * t * 0.012) % 1);
+      players.push({ uid: b.uid, name: b.name, team: b.team, x, y, z, yaw,
         step: phase, swing: Math.min(1, speed / 250) });
     }
     return { tick, players };
@@ -346,6 +351,42 @@ void main() {
   }
   function groundGuess() { const b = S.geo.play; return (b.minZ + b.maxZ) / 2; }
 
+  // Camera collision: shoot a ray from the player (tgt) toward the desired eye and, if a
+  // wall/ceiling is in the way, pull the eye in to just before it — so the chase/orbit cam
+  // never ends up buried inside geometry. One ray per frame over the triangle soup
+  // (Möller–Trumbore); returns the eye to actually use.
+  function collideEye(tgt, eye) {
+    const P = S.geo && S.geo.pos;
+    if (!P) return eye;
+    let dx = eye[0] - tgt[0], dy = eye[1] - tgt[1], dz = eye[2] - tgt[2];
+    const want = Math.hypot(dx, dy, dz);
+    if (want < 1e-3) return eye;
+    dx /= want; dy /= want; dz /= want;
+    const ox = tgt[0], oy = tgt[1], oz = tgt[2];
+    let nearest = want;
+    const EPS = 1e-6;
+    for (let i = 0, n = P.length; i < n; i += 9) {
+      const ax = P[i], ay = P[i + 1], az = P[i + 2];
+      const e1x = P[i + 3] - ax, e1y = P[i + 4] - ay, e1z = P[i + 5] - az;
+      const e2x = P[i + 6] - ax, e2y = P[i + 7] - ay, e2z = P[i + 8] - az;
+      const px = dy * e2z - dz * e2y, py = dz * e2x - dx * e2z, pz = dx * e2y - dy * e2x;
+      const det = e1x * px + e1y * py + e1z * pz;
+      if (det > -EPS && det < EPS) continue;
+      const inv = 1 / det;
+      const tx = ox - ax, ty = oy - ay, tz = oz - az;
+      const u = (tx * px + ty * py + tz * pz) * inv;
+      if (u < 0 || u > 1) continue;
+      const qx = ty * e1z - tz * e1y, qy = tz * e1x - tx * e1z, qz = tx * e1y - ty * e1x;
+      const v = (dx * qx + dy * qy + dz * qz) * inv;
+      if (v < 0 || u + v > 1) continue;
+      const t = (e2x * qx + e2y * qy + e2z * qz) * inv;
+      if (t > 8 && t < nearest) nearest = t; // t>8: ignore the player's own footprint
+    }
+    if (nearest >= want) return eye;
+    const d = Math.max(45, nearest - 16); // 16u skin so we sit just off the surface, 45u min
+    return [ox + dx * d, oy + dy * d, oz + dz * d];
+  }
+
   // aim pitch during a kill: point the POV cam at what was shot
   function aimPitch(idx, tick, p) {
     const kills = S.view.kills || [];
@@ -387,6 +428,9 @@ void main() {
       tgt = [fp[0], fp[1], fp[2] + 50];
       eye = [tgt[0] + d[0] * S.orbit.dist, tgt[1] + d[1] * S.orbit.dist, tgt[2] + d[2] * S.orbit.dist];
     }
+    // keep the chase/orbit camera out of walls (POV is the eye itself; top-down relies on
+    // the roof cut and wants to stay high, so neither of those collides)
+    if (S.mode === "chase" || S.mode === "orbit") eye = collideEye(tgt, eye);
     // smooth so the camera doesn't jitter with per-tick positions
     if (S.cam.eye && Math.abs(idx - S.cam.frame) < 3) {
       const k = 0.35;

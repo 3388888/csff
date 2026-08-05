@@ -1,6 +1,6 @@
 {
   "name": "csgo-demo-highlights",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Finds and ranks cool kills, clutches, and movement in CS:GO demos, with a 2D preview and one-click 'watch in CS:GO'.",
   "main": "main.js",
   "author": "",
@@ -40,6 +40,8 @@
       "vdm.js",
       "cssffcfg.js",
       "bspgeo.js",
+      "pixelsurf.js",
+      "mapfiles.js",
       "geo-worker.js",
       "renderer/**/*",
       "assets/**/*",

@@ -17,7 +17,8 @@ const path = require("path");
 
 const LUMP = {
   ENTITIES: 0, PLANES: 1, TEXDATA: 2, VERTEXES: 3, TEXINFO: 6, FACES: 7,
-  EDGES: 12, SURFEDGES: 13, MODELS: 14, DISPINFO: 26, DISP_VERTS: 33,
+  EDGES: 12, SURFEDGES: 13, MODELS: 14, BRUSHES: 18, BRUSHSIDES: 19,
+  DISPINFO: 26, DISP_VERTS: 33,
   TEXDATA_STRING_DATA: 43, TEXDATA_STRING_TABLE: 44, FACES_HDR: 58,
 };
 
@@ -388,4 +389,79 @@ function serialize(geo) {
   return buf;
 }
 
-module.exports = { extract, serialize, MAT, LUMP, HEADER };
+// ---------------------------------------------------------------- map meta (cheap)
+
+// Just the brush volumes we need to reason about a player's position — no faces, so this
+// reads a few hundred KB instead of the whole map and runs in milliseconds.
+//
+// Ladders are the reason this exists: a player standing still on a ladder looks EXACTLY
+// like a pixelsurf in the demo (airborne, no horizontal speed, not falling), so without
+// this every nuke/vertigo ladder would turn into a "highlight".
+//
+// Modern CS:GO maps build ladders out of TOOLS/TOOLSINVISIBLELADDER brushes: collision
+// only, no drawn faces and no entity — so neither the face lumps nor the entity lump know
+// about them. They only exist in the brush lumps, flagged CONTENTS_LADDER. Older maps
+// (and CS:S) use func_ladder / func_useableladder brush entities, so we take both.
+const LADDER_ENT_RE = /^func_(useable)?ladder$/;
+const CONTENTS_WATER = 0x20, CONTENTS_LADDER = 0x20000000;
+const BRUSH_SIZE = 12, BRUSHSIDE_SIZE = 8, PLANE_SIZE = 20;
+
+function extractMeta(file) {
+  const bsp = openBsp(file);
+  try {
+    const ladders = [], water = [];
+
+    // ---- collision brushes (axis-aligned box out of the brush's own planes)
+    const planes = bsp.read(LUMP.PLANES), brushes = bsp.read(LUMP.BRUSHES), sides = bsp.read(LUMP.BRUSHSIDES);
+    const nPlanes = (planes.length / PLANE_SIZE) | 0;
+    const nBrush = (brushes.length / BRUSH_SIZE) | 0;
+    const nSides = (sides.length / BRUSHSIDE_SIZE) | 0;
+    for (let i = 0; i < nBrush; i++) {
+      const b = i * BRUSH_SIZE;
+      const contents = brushes.readInt32LE(b + 8);
+      const isLadder = !!(contents & CONTENTS_LADDER), isWater = !!(contents & CONTENTS_WATER);
+      if (!isLadder && !isWater) continue;
+      const firstSide = brushes.readInt32LE(b), numSides = brushes.readInt32LE(b + 4);
+      let minX = -Infinity, minY = -Infinity, minZ = -Infinity, maxX = Infinity, maxY = Infinity, maxZ = Infinity;
+      for (let s = firstSide; s < firstSide + numSides && s >= 0 && s < nSides; s++) {
+        const pn = sides.readUInt16LE(s * BRUSHSIDE_SIZE);
+        if (pn >= nPlanes) continue;
+        const p = pn * PLANE_SIZE;
+        const nx = planes.readFloatLE(p), ny = planes.readFloatLE(p + 4), nz = planes.readFloatLE(p + 8), d = planes.readFloatLE(p + 12);
+        // only the axis-aligned sides matter — ladder/water brushes are boxes
+        if (Math.abs(nx) > 0.99) { if (nx > 0) maxX = Math.min(maxX, d); else minX = Math.max(minX, -d); }
+        else if (Math.abs(ny) > 0.99) { if (ny > 0) maxY = Math.min(maxY, d); else minY = Math.max(minY, -d); }
+        else if (Math.abs(nz) > 0.99) { if (nz > 0) maxZ = Math.min(maxZ, d); else minZ = Math.max(minZ, -d); }
+      }
+      const box = { minX, minY, minZ, maxX, maxY, maxZ };
+      if (!Object.values(box).every(Number.isFinite)) continue;
+      (isLadder ? ladders : water).push(box);
+    }
+
+    // ---- brush entities (older maps / CS:S)
+    const modelsBuf = bsp.read(LUMP.MODELS);
+    const nModels = (modelsBuf.length / MODEL_SIZE) | 0;
+    for (const e of parseEntities(bsp.read(LUMP.ENTITIES))) {
+      if (!LADDER_ENT_RE.test((e.classname || "").toLowerCase())) continue;
+      if (!(e.model && e.model[0] === "*")) continue;
+      const idx = parseInt(e.model.slice(1), 10);
+      if (!(idx >= 0 && idx < nModels)) continue;
+      const b = idx * MODEL_SIZE;
+      const box = {
+        minX: modelsBuf.readFloatLE(b), minY: modelsBuf.readFloatLE(b + 4), minZ: modelsBuf.readFloatLE(b + 8),
+        maxX: modelsBuf.readFloatLE(b + 12), maxY: modelsBuf.readFloatLE(b + 16), maxZ: modelsBuf.readFloatLE(b + 20),
+      };
+      const o = vec3(e.origin);
+      if (o && (o[0] || o[1] || o[2])) {
+        box.minX += o[0]; box.maxX += o[0]; box.minY += o[1]; box.maxY += o[1]; box.minZ += o[2]; box.maxZ += o[2];
+      }
+      if (Object.values(box).every(Number.isFinite)) ladders.push(box);
+    }
+
+    return { name: path.basename(file).replace(/\.bsp(\.bz2)?$/i, "").toLowerCase(), ladders, water };
+  } finally {
+    bsp.close();
+  }
+}
+
+module.exports = { extract, extractMeta, serialize, MAT, LUMP, HEADER };

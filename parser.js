@@ -34,14 +34,18 @@ const DEFAULTS = {
 // default point weights per tag (user-tunable via cfg.weights)
 const TAGW = {
   ace: 100, quad: 70, triple: 45, clutch: 85,
-  jump_noscope: 90, noscope: 65, jumpshot: 55, bhop: 50, airborne: 15, boosted: 12,
+  jump_noscope: 90, noscope: 65, jumpshot: 55, pixelsurf: 70, bhop: 50, airborne: 15, boosted: 12,
   flick_hs: 55, flick: 35, spin: 55, long_range: 25, wallbang: 45, airshot: 22, collateral: 45,
   smoke_kill: 30, blind_kill: 40, smoke_streak: 20, blind_streak: 25, rng: 55, off_height: 45, outnumbered: 35,
   bhop_run: 22, fast: 12, long_chain: 20, edgebug: 55, jumpbug: 45, into_kill: 45,
   troll: 50, surf: 48, flashboost: 46,
 };
-// "funny" kills: melee, grenade/molotov, or zeus. A knife/nade multikill is peak troll.
-const TROLL_RE = /knife|bayonet|karambit|daggers?|butterfly|falchion|huntsman|shadow_daggers|ursus|navaja|stiletto|talon|nomad|skeleton|classic_knife|paracord|survival_knife|gut_knife|flip_knife|m9_bayonet|hegrenade|molotov|incgrenade|inferno|firebomb|taser/i;
+// "funny" kills: melee, HE nade, or zeus. A knife/nade multikill is peak troll.
+// Fire kills (molotov/incendiary/inferno) are deliberately NOT here — a burn kill is
+// usually chip damage on an AFK/low target, not a skill moment, so it must not ride the
+// high "troll" weight into the top ranks.
+const TROLL_RE = /knife|bayonet|karambit|daggers?|butterfly|falchion|huntsman|shadow_daggers|ursus|navaja|stiletto|talon|nomad|skeleton|classic_knife|paracord|survival_knife|gut_knife|flip_knife|m9_bayonet|hegrenade|taser/i;
+const FIRE_RE = /molotov|incgrenade|incendiary|inferno|firebomb/i;
 const SNIPERS = new Set(["awp", "ssg08", "scar20", "g3sg1"]);
 // weapon categories + cssff-derived frag thresholds (source units / seconds)
 const WPCAT = { ak47: "Rifles", m4a1: "Rifles", m4a1_silencer: "Rifles", sg556: "Rifles", aug: "Rifles", famas: "Rifles", galilar: "Rifles",
@@ -62,10 +66,10 @@ const FRAG = {
   multiMax: { 3: { default: 2, Rifles: 0.8, Snipers: 4, AutoSnipers: 1.6, Pistols: 1.2, Deagle: 3, Shotguns: 3, Knife: 4 }, 4: { default: 6.5, Snipers: 10, Shotguns: 15, Knife: 15 }, 5: { default: 13, Snipers: 15, Scout: 15, Shotguns: 15, Knife: 60 } },
   multiExtra: { 3: 0.5, 4: 1, 5: 3 }, // per special kill in the burst
 };
-const SPECIAL_TAGS = new Set(["noscope", "jump_noscope", "jumpshot", "flick", "flick_hs", "wallbang", "smoke_kill", "blind_kill", "spin", "troll"]);
+const SPECIAL_TAGS = new Set(["noscope", "jump_noscope", "jumpshot", "pixelsurf", "flick", "flick_hs", "wallbang", "smoke_kill", "blind_kill", "spin", "troll"]);
 // a single kill must have one of these "real frag" reasons to be a highlight at all (cssff-style
 // minimum bar). "outnumbered"/airborne/boosted are context modifiers — they don't qualify alone.
-const QUALIFY_TAGS = new Set(["noscope", "jump_noscope", "jumpshot", "flick", "flick_hs", "spin", "wallbang", "collateral", "smoke_kill", "blind_kill", "airshot", "long_range", "off_height", "troll"]);
+const QUALIFY_TAGS = new Set(["noscope", "jump_noscope", "jumpshot", "pixelsurf", "flick", "flick_hs", "spin", "wallbang", "collateral", "smoke_kill", "blind_kill", "airshot", "long_range", "off_height", "troll"]);
 const WBASE = { awp: .95, ssg08: .92, scar20: .85, g3sg1: .85, ak47: .72, m4a1: .75, m4a1_silencer: .78, sg556: .7, aug: .74, famas: .66, galilar: .64,
   deagle: .6, revolver: .55, glock: .66, hkp2000: .7, usp_silencer: .72, p250: .68, tec9: .62, cz75a: .6, fiveseven: .7, elite: .58,
   mp9: .66, mac10: .6, mp7: .66, ump45: .66, p90: .64, bizon: .62, mp5sd: .68, nova: .5, xm1014: .48, mag7: .5, sawedoff: .45, m249: .55, negev: .5 };
@@ -436,12 +440,23 @@ function classify(raw, cfg = {}) {
   for (const r in rvd) warmupRound[r] = Object.values(rvd[r]).some((c) => c >= 2) || (killsPerRound[r] || 0) >= 12;
   const refragRound = warmupRound; // (kept name for the scoring penalty on any that slip through)
 
+  // confirmed pixelsurf holds, per player: [startTick, endTick]. The candidates are found
+  // by the decoder (csgofast) and vetted against the map's ladder/water brushes before we
+  // get here (pixelsurf.js). A kill fired while airborne inside a hold is a pixelsurf kill.
+  const pixelHolds = {};
+  for (const tr of raw.tricks || []) {
+    if (tr.kind !== "pixelsurf") continue;
+    (pixelHolds[tr.uid] = pixelHolds[tr.uid] || []).push([tr.tick - 4, tr.tick + (tr.durTicks || 0) + 8]);
+  }
+  const onPixel = (uid, tick) => (pixelHolds[uid] || []).some(([a, b]) => tick >= a && tick <= b);
+
   // enrich every kill (recompute hit-chance with the new model; flag afk/spin/warmup)
   for (const k of raw.kills) {
     k.hitChance = +computeHitChance(k).toFixed(3);
     k._afkMoved = movedInWindow(k.victim.uid, k.killTick - tickrate * 3, k.killTick);
     k._spin = spinInWindow(k.attacker.uid, k.killTick - tickrate, k.killTick);
     k._refrag = !!refragRound[k.round];
+    k._pixel = k.telemetry.airborneAtKill && onPixel(k.attacker.uid, k.killTick);
   }
 
   // when each player died in each round — the timeline keeps sampling corpses/spectators,
@@ -466,13 +481,17 @@ function classify(raw, cfg = {}) {
   function trickTags(k, grp) {
     const t = k.telemetry, tags = [], cat = wcat(k.weapon), sniper = SNIPERS.has(k.weapon), d = k.distUnits || 0;
     const r = rulesFor(cat);
+    // PIXELSURF: he reads as airborne, but he's parked on a sliver of wall, not jumping.
+    // Calling that a jumpshot/jump-noscope is wrong, so it replaces the airborne tags.
+    const pixel = !!k._pixel;
+    if (pixel) tags.push("pixelsurf");
     // NO-SCOPE (snipers): must be at real distance. HS / wallbang lower the bar.
     if (k.noscope && sniper && r.noscope.tick) {
       const minD = r.noscope.dist * (k.headshot ? r.noscope.hsMod : 1) * (k.penetrated > 0 ? r.noscope.wbMod : 1);
-      if (d >= minD) tags.push(t.airborneAtKill ? "jump_noscope" : "noscope");
+      if (d >= minD) tags.push(t.airborneAtKill && !pixel ? "jump_noscope" : "noscope");
     }
     // JUMPSHOT: airborne kill at distance (Snipers set the distance to 0 = any).
-    if (t.airborneAtKill && r.jump.tick && !(k.noscope && sniper)) {
+    if (t.airborneAtKill && !pixel && r.jump.tick && !(k.noscope && sniper)) {
       const minJ = r.jump.dist * (k.headshot ? r.jump.hsMod : 1) * (k.penetrated > 0 ? r.jump.wbMod : 1);
       if (d >= minJ) tags.push("jumpshot");
     }
@@ -621,6 +640,12 @@ function classify(raw, cfg = {}) {
           if (!multiQualifies(sub)) continue;
           const tagSet = new Set([multiTag(sub.length)]);
           for (const k of sub) { for (const t of k._tags) tagSet.add(t); used.add(k); }
+          // a collateral INSIDE the burst (one bullet, 2+ kills on the same tick) should tag
+          // the whole clip, so filtering "collateral" surfaces collats-within-aces, not just
+          // stand-alone ones.
+          const perTick = {};
+          for (const k of sub) (perTick[k.killTick] = perTick[k.killTick] || []).push(k);
+          if (Object.values(perTick).some((a) => a.length >= 2 && a.some((k) => k.penetrated > 0))) tagSet.add("collateral");
           highlights.push(makeHighlight(sub, [...tagSet]));
           chain = [];
           return;
@@ -650,6 +675,53 @@ function classify(raw, cfg = {}) {
       highlights.push(makeHighlight(arr, [...tagSet]));
     }
     for (const k of grp) { if (used.has(k)) continue; if (k._tags.some((t) => QUALIFY_TAGS.has(t))) highlights.push(makeHighlight([k], k._tags)); }
+  }
+
+  // DEEP SCAN (only when a multikill category is selected in the UI). The normal burst logic
+  // only ticks a "fast" multi inside the tight fragmovie window; this finds multis the player
+  // actually got that were a bit more spread out — but NOT the whole round: capped at
+  // deepMultiMaxSec (default 25s), so they stay close to the fast ones, not glacial.
+  const deepMulti = ["ace", "quad", "triple"].includes(cfg.deepCategory);
+  if (deepMulti) {
+    const need = cfg.deepCategory === "ace" ? 5 : cfg.deepCategory === "quad" ? 4 : 3;
+    const tag = cfg.deepCategory;
+    const maxSec = cfg.deepMultiMaxSec ?? 25;
+    const perRound = new Map();
+    for (const k of raw.kills) {
+      if (warmupRound[k.round]) continue;
+      const akey = k.attacker.uid != null ? k.attacker.uid : (k.attacker.steamId || k.attacker.name);
+      const key = k.round + "|" + akey;
+      if (!perRound.has(key)) perRound.set(key, []);
+      perRound.get(key).push(k);
+    }
+    const already = new Set();
+    for (const h of highlights) {
+      if (h.type === "movement" || !h.tags.includes(tag)) continue;
+      const akey = h.attacker.uid != null ? h.attacker.uid : (h.attacker.steamId || h.attacker.name);
+      already.add(h.round + "|" + akey);
+    }
+    for (const [key, ks] of perRound) {
+      if (ks.length < need || already.has(key)) continue;
+      ks.sort((a, b) => a.killTick - b.killTick);
+      // tightest window of `need` consecutive kills that fits the moderate time cap
+      let best = null;
+      for (let i = 0; i + need <= ks.length; i++) {
+        const win = ks.slice(i, i + need);
+        const span = (win[need - 1].killTick - win[0].killTick) / tickrate;
+        if (span <= maxSec && (!best || span < best.span)) best = { win, span };
+      }
+      if (!best) continue;
+      const sub = best.win;
+      for (const k of sub) if (!k._tags) k._tags = trickTags(k, ks);
+      const tagSet = new Set([tag]);
+      for (const k of sub) for (const t of k._tags) tagSet.add(t);
+      const perTick = {};
+      for (const k of sub) (perTick[k.killTick] = perTick[k.killTick] || []).push(k);
+      if (Object.values(perTick).some((a) => a.length >= 2 && a.some((k) => k.penetrated > 0))) tagSet.add("collateral");
+      const h = makeHighlight(sub, [...tagSet]);
+      h.deepFound = true; // surfaced by a category deep-scan, a bit more spread than a fast burst
+      highlights.push(h);
+    }
   }
 
   // movement (bhop) runs — keep ONLY a SHORT run that flows straight into a NOTABLE kill
@@ -685,13 +757,19 @@ function classify(raw, cfg = {}) {
   const fallDmg = (v) => Math.max(0, Math.round((v - 580) * 0.1333));
   const killWin = Math.round(tickrate * 4);
   raw.tricks.sort((a, b) => a.tick - b.tick);
+  // A flashbang next to you throws velocity around, and that same spike is what the
+  // edgebug and surf detectors trip on. So a flashboost WINS: if one fired on the same
+  // player within ~1.5s, this isn't an edgebug or a surf, it's the boost.
+  const flashNear = (tr) => raw.tricks.some((s) => s.kind === "flashboost" && s.uid === tr.uid && Math.abs(s.tick - tr.tick) <= Math.round(tickrate * 1.5));
   const lastTrick = {};
   for (const tr of raw.tricks) {
+    if (tr.kind === "pixelsurf") continue; // handled as a kill tag (trickTags), not a movement clip
     const key = tr.uid + "|" + tr.kind; if (lastTrick[key] && tr.tick - lastTrick[key] < tickrate) continue; lastTrick[key] = tr.tick;
     const fk = raw.kills.find((k) => (k.attacker.steamId === tr.steamId || k.attacker.name === tr.name) && k.killTick >= tr.tick && k.killTick <= tr.tick + killWin);
     if (fk && warmupRound[fk.round]) continue; // no warmup/DM tricks
     if (tr.kind === "surf") {
       // surf / wall-glide: keep a long one on its own, or any that flows into a kill
+      if (flashNear(tr)) continue; // a flash-launched glide is a flashboost, not a surf
       const longSurf = (tr.durTicks || 0) >= tickrate * 1.2;
       if (!fk && !longSurf) continue;
       const tags = fk ? ["surf", "into_kill"] : ["surf"];
@@ -703,7 +781,11 @@ function classify(raw, cfg = {}) {
       continue;
     }
     if (tr.kind === "flashboost") {
-      // flash-boosted mate — a rare, deliberate movement moment; keep it (tag the kill if one follows)
+      // flash-boosted mate — a rare, deliberate movement moment. But most flash-adjacent
+      // velocity spikes are failed boosts or someone just running past a pop, so a
+      // stand-alone one has to actually launch (high resulting speed AND a big delta).
+      // Anything that leads to a kill is always kept.
+      if (!fk && (tr.fallVel < 420 || tr.spd < 230)) continue;
       const tags = fk ? ["flashboost", "into_kill"] : ["flashboost"];
       let score = (W.flashboost || 46) + (fk ? (W.into_kill || 45) : 0) + Math.round(Math.min((tr.fallVel || 0) / 8, 30));
       highlights.push({ id: hid++, type: "movement", round: fk ? fk.round : 0, attacker: { name: tr.name, steamId: tr.steamId, team: tr.team, uid: tr.uid },
@@ -715,6 +797,7 @@ function classify(raw, cfg = {}) {
     // edgebug/jumpbug: must lead to a kill (kill-less ones are almost all surfs/flashboosts
     // off the map). Also drop it if a surf glide started right around it — that's a surf.
     if (!fk) continue;
+    if (flashNear(tr)) continue; // flash-caused vz swing masquerading as an edgebug
     const surfNear = raw.tricks.some((s) => s.kind === "surf" && s.uid === tr.uid && Math.abs(s.tick - tr.tick) <= tickrate * 2);
     if (surfNear) continue;
     const dmgSaved = fallDmg(tr.fallVel);
@@ -754,11 +837,19 @@ function classify(raw, cfg = {}) {
 
   // focused clips first, then by score — so the named moment can never be cut by the cap
   highlights.sort((a, b) => (a.offFocus ? 1 : 0) - (b.offFocus ? 1 : 0) || b.coolScore - a.coolScore || a.watchTick - b.watchTick);
-  const capped = highlights.slice(0, cfg.maxHighlights || 80);
+  // deep scan returns just the selected category, UNCAPPED (nothing hidden by the per-demo
+  // limit); a normal pass caps to the top N so the aggregate stays light.
+  const capped = cfg.deepCategory
+    ? highlights.filter((h) => (h.tags || []).includes(cfg.deepCategory))
+    : highlights.slice(0, cfg.maxHighlights || 80);
   const maxPrev = Math.round(tickrate * (cfg.maxPreviewSec || 25));
   const rawUtils = raw.utils || [];
+  // The folder scan throws previews away (they're fetched on demand via demo:frames), so
+  // skip building them there — slicing the megabyte timeline for every clip is pure waste
+  // when re-classifying thousands of demos from cache. Single-demo view builds them.
   for (const h of capped) {
     h.tickrate = tickrate;
+    if (cfg.noPreview) continue;
     const end = Math.min(h.endTick, h.watchTick + maxPrev); // cap every clip length
     const activeUtils = rawUtils.filter((u) => u.endTick >= h.watchTick && u.tick <= end);
     h.preview = { tickrate, watchTick: h.watchTick, endTick: end, frames: sliceFrames(h.watchTick, end, h.round), utils: activeUtils };
@@ -773,7 +864,11 @@ function classify(raw, cfg = {}) {
     .map((p) => ({ ...p, hs: p.kills > 0 ? Math.round((p.headshots / p.kills) * 100) : 0, adr: Math.round(p.damage / rounds), kd: +(p.kills / Math.max(p.deaths, 1)).toFixed(2), roundKills: perRound.get(p.steamId) || new Array(rounds).fill(0), roundHs: perRoundHs.get(p.steamId) || new Array(rounds).fill(0) }))
     .sort((a, b) => b.kills - a.kills || a.deaths - b.deaths);
 
-  return { header: raw.header, mapName: raw.mapName, tickrate, score: raw.score, roundWinners: raw.roundWinners, players, highlights, tickHints: hints };
+  // return `capped`, NOT the full list: in deep mode capped is filtered to the selected
+  // category (so a deep-scan merges ONLY that category, never re-adds everything), and in
+  // normal mode it's the top-N. Returning the raw `highlights` here is what doubled the
+  // store when deep-scanning a category.
+  return { header: raw.header, mapName: raw.mapName, tickrate, score: raw.score, roundWinners: raw.roundWinners, players, highlights: capped, tickHints: hints };
 }
 
 function parseDemo(demPath, cfg = {}) { return parseRaw(demPath, cfg).then((raw) => classify(raw, cfg)); }

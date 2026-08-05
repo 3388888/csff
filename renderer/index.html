@@ -68,6 +68,7 @@
               <select id="filterType" title="kill type"><option value="">any type</option></select>
               <input id="filterDist" type="number" min="0" step="5" placeholder="min m" title="minimum distance (meters)" />
               <select id="filterFav" title="favorites"><option value="">all</option><option value="fav">★ favorites</option></select>
+              <select id="filterSort" title="sort order"><option value="score">best first</option><option value="new">newest first</option><option value="old">oldest first</option><option value="long">longest clip</option><option value="short">shortest clip</option></select>
               <select id="filterFocus" title="when a demo is named after a tick, show only that moment (plus anything insane)"><option value="focus">◎ named tick</option><option value="">everything</option></select>
             </div>
             <div id="coolList"></div>
@@ -151,6 +152,12 @@
       <div class="row"><input id="setMaps2" type="text" placeholder="…\Downloads\custom maps" /><button id="pickMaps2" class="mini">Browse</button></div>
       <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:12px">
         <input id="setPrefer3d" type="checkbox" style="width:auto" /> Open previews in 3D when the map's geometry is available
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px">
+        <input id="setBroaden" type="checkbox" style="width:auto" /> Broaden filters — a weapon/type filter also matches clips that merely <em>contain</em> it (e.g. a collateral inside an ace), not just pure ones
+      </label>
+      <label style="display:flex;align-items:center;gap:8px;cursor:pointer;margin-top:8px">
+        <input id="setPauseOnOpen" type="checkbox" style="width:auto" /> Pause at the clip start when opening in CS:GO/CS:S (lets the skip settle so the kill isn't jittery — press play / <code>demo_resume</code> to run it)
       </label>
 
       <div class="set-section">Frag rules <small>— read from <code>cssff_settings.ini</code>. That file is the law: edit it and re-scan.</small>

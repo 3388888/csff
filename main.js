@@ -1,9 +1,31 @@
 const { app, BrowserWindow, ipcMain, dialog, shell } = require("electron");
 const path = require("path");
 const fs = require("fs");
-const { fork, spawn } = require("child_process");
+const os = require("os");
+const { fork, spawn, execFile } = require("child_process");
+const seekBzip = require("seek-bzip");
 const settings = require("./settings");
 const { writeVdmForDemo } = require("./vdm");
+
+// CS:GO/CS:S can't playdemo a .bz2 — extract it to the sibling .dem (once) and use THAT for
+// both the .vdm and the launch, so compressed demos stop silently failing to launch.
+// The bzip2 decode runs in a forked worker (doing it inline froze the UI). Idempotent.
+function extractDem(inp, out) {
+  return new Promise((resolve) => {
+    const child = fork(path.join(__dirname, "parse-worker.js"), [], { stdio: ["inherit", "inherit", "inherit", "ipc"] });
+    const t = setTimeout(() => { try { child.kill(); } catch {} resolve(false); }, 180000);
+    child.on("message", (m) => { clearTimeout(t); try { child.kill(); } catch {} resolve(!!(m && m.ok)); });
+    child.on("error", () => { clearTimeout(t); resolve(false); });
+    child.send({ extract: true, in: inp, out });
+  });
+}
+async function playableDem(demPath) {
+  if (!/\.bz2$/i.test(demPath || "")) return demPath;
+  const out = demPath.replace(/\.bz2$/i, "");
+  if (fs.existsSync(out) && fs.statSync(out).size > 1000) return out; // already extracted
+  await extractDem(demPath, out);
+  return fs.existsSync(out) ? out : demPath;
+}
 
 app.setName("CSGO Demo Highlights"); // share cache/ratings/settings between dev run and installed build
 
@@ -53,6 +75,25 @@ ipcMain.handle("dialog:pickDemos", async () => {
 
 // One entry per demo: an extracted .dem (file or folder) wins over its .bz2.
 // Recurses into subfolders (up to a depth) so demos organized in subdirs are found.
+// How busy the CPU is *right now* — so the scanner can size its worker pool to the cores
+// actually free (Windows Defender's real-time scan can eat a third of them). Samples the
+// per-core idle deltas over a short window and reports how many cores are effectively idle.
+ipcMain.handle("cpu:sample", async (e, ms) => {
+  const snap = () => os.cpus().map((c) => c.times);
+  const a = snap();
+  await new Promise((r) => setTimeout(r, Math.max(120, Math.min(1000, ms || 350))));
+  const b = snap();
+  let idle = 0, total = 0;
+  for (let i = 0; i < b.length; i++) {
+    const di = b[i].idle - a[i].idle;
+    const dt = Object.keys(b[i]).reduce((s, k) => s + (b[i][k] - a[i][k]), 0);
+    idle += di; total += dt;
+  }
+  const cores = b.length;
+  const idleFrac = total > 0 ? idle / total : 0.5;
+  return { cores, freeCores: Math.max(1, Math.round(cores * idleFrac)), idlePct: Math.round(idleFrac * 100) };
+});
+
 ipcMain.handle("demos:list", (e, dir) => {
   const byKey = new Map(); // basename(no .bz2) -> {name, path, compressed, rank}
   function consider(f, full, isDir) {
@@ -76,15 +117,33 @@ ipcMain.handle("demos:list", (e, dir) => {
     }
   }
   walk(dir, 4);
-  return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name)).map(({ name, path: p, compressed }) => ({ name, path: p, compressed }));
+  return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name)).map(({ name, path: p, compressed }) => {
+    // file mtime doubles as the match date, so the UI can show/sort highlights by age
+    let mtime = 0; try { mtime = Math.round(fs.statSync(p).mtimeMs); } catch {}
+    return { name, path: p, compressed, mtime };
+  });
 });
 
 function cacheDir() { const d = path.join(app.getPath("userData"), "cache"); fs.mkdirSync(d, { recursive: true }); return d; }
-// RAW cache key — parser version only, NOT thresholds/weights (those apply at
-// classify time, so tuning them never re-decodes). v8 = split decode/classify.
-function rawKey(demoPath) {
+// RAW decode cache, newest format first. Reading tries every version in order and uses
+// the first that exists; only a demo with NO cache at all is decoded. So a version bump
+// (a new decoder signal like pixelsurf) NEVER forces a re-decode of demos already cached
+// — they load as-is, missing only the newest signal (which degrades gracefully), and fill
+// in as demos are freshly decoded. Classify/scoring/tag/filter changes never touch this
+// cache at all; they re-run from it (minutes), which is NOT the 17h decode.
+//   v8 = split decode/classify;  v9 = + pixelsurf candidates & trick x/y/z
+const RAW_VERSIONS = ["v9", "v8"];
+function rawName(demoPath, ver) {
   const base = path.basename(demoPath).replace(/\.dem(\.bz2)?$/i, "").replace(/[^\w.-]/g, "_");
-  return `${base}_raw_v8.json.gz`;
+  return `${base}_raw_${ver}.json.gz`;
+}
+function rawWritePath(demoPath) { return path.join(cacheDir(), rawName(demoPath, RAW_VERSIONS[0])); }
+function rawReadPath(demoPath) {
+  for (const ver of RAW_VERSIONS) {
+    const p = path.join(cacheDir(), rawName(demoPath, ver));
+    if (fs.existsSync(p)) return p;
+  }
+  return null;
 }
 // CS:S results live in the SAME cache folder as the CS:GO raws (they used to be written
 // next to the demo, which littered the demo folder and re-parsed on every open).
@@ -108,16 +167,43 @@ ipcMain.handle("cssff:config", () => {
 });
 ipcMain.handle("cssff:reveal", () => { shell.showItemInFolder(cssffIniPath()); return true; });
 
-// decode-once (cached raw) + classify with current settings, in a forked worker
-ipcMain.handle("demo:parse", (e, demoPath, opts) => new Promise((resolve, reject) => {
-  const rawFile = path.join(cacheDir(), rawKey(demoPath));
+// Persistent worker pool. Forking a fresh process per demo (spawn + module load each time)
+// was the real cost of "re-classify from cache" — thousands of process startups. Instead we
+// keep a handful of workers alive and reuse them, so a cache re-classify is just IPC + read.
+const idleWorkers = [];
+function newWorker() {
   const child = fork(path.join(__dirname, "parse-worker.js"), [], { stdio: ["inherit", "inherit", "inherit", "ipc"] });
-  const timer = setTimeout(() => { child.kill(); reject(new Error("Parse timed out")); }, 3 * 60 * 1000);
-  child.on("message", (m) => {
+  const w = { child, busy: false };
+  child.on("exit", () => { const i = idleWorkers.indexOf(w); if (i >= 0) idleWorkers.splice(i, 1); });
+  return w;
+}
+function acquireWorker() {
+  while (idleWorkers.length) { const w = idleWorkers.pop(); if (w.child && !w.child.killed) return w; }
+  return newWorker();
+}
+function releaseWorker(w) { if (w && w.child && !w.child.killed) { w.busy = false; idleWorkers.push(w); } }
+
+// decode-once (cached raw) + classify with current settings, on a pooled worker
+ipcMain.handle("demo:parse", (e, demoPath, opts) => new Promise((resolve, reject) => {
+  // read the newest cache that exists; write the current format. forceDecode (background
+  // pixelsurf backfill) ignores the read cache so an old v8 demo is re-decoded to v9.
+  const rawRead = (opts && opts.forceDecode) ? null : rawReadPath(demoPath);
+  const rawWrite = rawWritePath(demoPath);
+  const w = acquireWorker();
+  const child = w.child;
+  let settled = false;
+  const cleanup = () => { child.off("message", onMsg); child.off("error", onErr); };
+  const onMsg = (m) => {
     if (m.type === "progress") { if (win && !win.isDestroyed()) win.webContents.send("parse:progress", { demoPath, frac: m.frac }); return; }
-    clearTimeout(timer); child.kill(); m.ok ? resolve(m.result) : reject(new Error(m.error));
-  });
-  child.on("error", (err) => { clearTimeout(timer); reject(err); });
+    if (m.type === "log") { console.log("[worker]", m.text); return; } // pixelsurf confirm report, etc.
+    if (settled) return; settled = true; clearTimeout(timer); cleanup(); releaseWorker(w);
+    m.ok ? resolve(m.result) : reject(new Error(m.error));
+  };
+  const onErr = (err) => { if (settled) return; settled = true; clearTimeout(timer); cleanup(); try { child.kill(); } catch {} reject(err); };
+  // a hung decode must not poison the pool: kill (don't reuse) on timeout
+  const timer = setTimeout(() => { if (settled) return; settled = true; cleanup(); try { child.kill(); } catch {} reject(new Error("Parse timed out")); }, 3 * 60 * 1000);
+  child.on("message", onMsg);
+  child.on("error", onErr);
   const cssffDir = app.isPackaged ? path.join(process.resourcesPath, "cssff") : path.join(__dirname, "vendor", "cssff");
   const csgofast = app.isPackaged ? path.join(process.resourcesPath, "csgofast", "csgofast.exe") : path.join(__dirname, "native", "csgofast", "csgofast.exe");
   const cssfast = app.isPackaged ? path.join(process.resourcesPath, "cssfast", "cssfast.exe") : path.join(__dirname, "native", "cssfast", "cssfast.exe");
@@ -125,15 +211,25 @@ ipcMain.handle("demo:parse", (e, demoPath, opts) => new Promise((resolve, reject
   // on the next scan without restarting anything
   opts = { ...(opts || {}), cssff: cssffConfig() };
   const cssFile = path.join(cacheDir(), cssKey(demoPath));
-  child.send({ path: demoPath, opts, rawFile, cssFile, cssffDir, csgofast, cssfast });
+  child.send({ path: demoPath, opts, rawRead, rawWrite, cssFile, cssffDir, csgofast, cssfast,
+    mapDirs: mapSearchDirs(), geoDir: geoCacheDir() }); // for pixelsurf ladder/water vetting
 }));
+
+// which of these demos still lack the newest decode (v9 = pixelsurf)? the renderer uses
+// this to backfill them in the background without re-decoding what's already current.
+ipcMain.handle("demos:pixelsurfPending", (e, demoPaths) => {
+  const cur = RAW_VERSIONS[0];
+  return (demoPaths || []).filter((p) => {
+    try { return !fs.existsSync(path.join(cacheDir(), rawName(p, cur))); } catch { return false; }
+  });
+});
 
 // fast preview: slice just the frames for one highlight straight from the cached raw
 // (no full re-classify). This is what makes the preview open quickly.
 ipcMain.handle("demo:frames", (e, demPath, watchTick, endTick, maxPreviewSec, round) => {
   try {
-    const rawFile = path.join(cacheDir(), rawKey(demPath));
-    if (!fs.existsSync(rawFile)) return cssFrames(demPath, watchTick, endTick, maxPreviewSec);
+    const rawFile = rawReadPath(demPath);
+    if (!rawFile) return cssFrames(demPath, watchTick, endTick, maxPreviewSec);
     const raw = JSON.parse(zlib.gunzipSync(fs.readFileSync(rawFile)));
     const tickrate = raw.tickrate || 64;
     const end = Math.min(endTick, watchTick + Math.round(tickrate * (maxPreviewSec || 25)));
@@ -149,7 +245,7 @@ ipcMain.handle("demo:frames", (e, demPath, watchTick, endTick, maxPreviewSec, ro
     const frames = [];
     for (const f of raw.timeline) {
       if (f.t < watchTick || f.t > end) continue;
-      frames.push({ tick: f.t, players: f.p.map((q) => ({ uid: q[0], x: q[1], y: q[2], yaw: q[3], team: q[4], z: q[5] == null ? null : q[5],
+      frames.push({ tick: f.t, players: f.p.filter((q) => q[4] === 2 || q[4] === 3).map((q) => ({ uid: q[0], x: q[1], y: q[2], yaw: q[3], team: q[4], z: q[5] == null ? null : q[5],
         name: (raw.roster[q[0]] || {}).name || "", dead: deathAt[q[0]] != null && f.t >= deathAt[q[0]] ? deathAt[q[0]] : null })) });
     }
     const utils = (raw.utils || []).filter((u) => u.endTick >= watchTick && u.tick <= end);
@@ -172,7 +268,7 @@ function cssFrames(demPath, watchTick, endTick, maxPreviewSec) {
     const frames = [];
     for (const fr of j.timeline) {
       if (fr.t < watchTick || fr.t > end) continue;
-      frames.push({ tick: fr.t, players: fr.p.map((q) => ({ uid: q[0], x: q[1], y: q[2], yaw: q[3], team: q[4], z: q[5],
+      frames.push({ tick: fr.t, players: fr.p.filter((q) => q[4] === 2 || q[4] === 3).map((q) => ({ uid: q[0], x: q[1], y: q[2], yaw: q[3], team: q[4], z: q[5],
         name: (roster[q[0]] || {}).name || "", dead: null })) });
     }
     if (!frames.length) return null;
@@ -183,9 +279,8 @@ function cssFrames(demPath, watchTick, endTick, maxPreviewSec) {
 }
 
 // write a .vdm next to the demo covering all cool kills
-ipcMain.handle("vdm:write", (e, demPath, coolKills, opts) => {
-  const p = writeVdmForDemo(demPath, coolKills, opts);
-  return p;
+ipcMain.handle("vdm:write", async (e, demPath, coolKills, opts) => {
+  return writeVdmForDemo(await playableDem(demPath), coolKills, opts); // .vdm sits next to the real .dem
 });
 
 ipcMain.handle("shell:showItem", (e, p) => { shell.showItemInFolder(p); });
@@ -412,11 +507,29 @@ function sendNetcon(port, cmds) {
     sock.on("error", () => fin(false));
   });
 }
+// is a process with this exe name already running? (so we don't spawn a doomed 2nd copy)
+function isRunning(exeBase) {
+  return new Promise((resolve) => {
+    try { execFile("tasklist", ["/FI", `IMAGENAME eq ${exeBase}`, "/NH"], { windowsHide: true }, (err, out) => resolve(!err && String(out).toLowerCase().includes(exeBase.toLowerCase()))); }
+    catch { resolve(false); }
+  });
+}
 // launch the game to play the demo (VDM auto-loads if same basename next to it).
 // If a netcon port is set and the game is up, jump in the running instance instead.
 async function launchGame(exe, demPath, port) {
-  if (port) { const ok = await sendNetcon(+port, [`playdemo "${demPath}"`]); if (ok) return { ok: true, running: true }; }
+  demPath = await playableDem(demPath); // extract .bz2 -> .dem so playdemo can actually read it
+  // resume before switching: loading a new demo while the current one is PAUSED is extra
+  // crash-prone, and that's exactly the state our own demo_pause leaves it in.
+  if (port) { const ok = await sendNetcon(+port, ["demo_resume", `playdemo "${demPath}"`]); if (ok) return { ok: true, running: true }; }
   if (!exe || !fs.existsSync(exe)) return { ok: false, error: "Set the game exe path in Settings (or launch the game with -netconport)." };
+  // netcon didn't answer. If the game is ALREADY open (you started it yourself, without
+  // console access) a second copy just errors with "only one instance" — so don't. Tell
+  // the user how to make jump-in work instead.
+  const base = path.basename(exe);
+  if (await isRunning(base)) {
+    return { ok: false, running: true, error: `${base} is already open but I can't control it — it wasn't started with console access. Close the game, then click again and I'll relaunch it so demos jump straight to the clip. (The .vdm is written next to the demo, so you can also load it manually with playdemo.)` };
+  }
+  // game not running: launch it WITH -netconport so every later clip jumps into this instance
   try { const child = spawn(exe, ["-novid", "-insecure", ...(port ? ["-netconport", String(port)] : []), "+playdemo", demPath], { detached: true, stdio: "ignore", cwd: path.dirname(exe) }); child.unref(); return { ok: true }; }
   catch (err) { return { ok: false, error: err.message }; }
 }

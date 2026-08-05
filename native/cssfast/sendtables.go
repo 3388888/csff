@@ -46,6 +46,10 @@ const (
 	spropCoordMPLP    = 1 << 13
 	spropCoordMPInt   = 1 << 14
 	spropChangesOften = 1 << 18 // newer branches; harmless if unused
+	// The Orange Box engine reused the SPROP_NORMAL bit for integers to mean "varint
+	// encoded" (NORMAL only ever applies to floats/vectors, VARINT only to ints, so the
+	// bit is free). An int with this flag is a protobuf varint, not nBits fixed bits.
+	spropVarInt = spropNormal
 )
 
 const (
@@ -350,11 +354,13 @@ func flattenClass(c *serverClass, tables map[string]*sendTable) {
 	// Priority pass: SPROP_CHANGES_OFTEN props move to the front. The engine does this
 	// with a swap (not a stable partition), and the resulting order IS the prop index
 	// space used by the delta stream, so it has to be the same swap.
-	start := 0
-	for i := range flat {
-		if flat[i].prop.flags&spropChangesOften != 0 {
-			flat[i], flat[start] = flat[start], flat[i]
-			start++
+	if os.Getenv("NOPRIO") == "" {
+		start := 0
+		for i := range flat {
+			if flat[i].prop.flags&spropChangesOften != 0 {
+				flat[i], flat[start] = flat[start], flat[i]
+				start++
+			}
 		}
 	}
 	c.flat = flat

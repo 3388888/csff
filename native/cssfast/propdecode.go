@@ -9,6 +9,12 @@ import "math"
 func decodeProp(b *bitReader, p *sendProp) interface{} {
 	switch p.typ {
 	case dptInt:
+		if p.flags&spropVarInt != 0 { // SPROP_VARINT (aliased onto the NORMAL bit for ints)
+			if p.flags&spropUnsigned != 0 {
+				return int(b.readVarInt32())
+			}
+			return b.readSignedVarInt32()
+		}
 		if p.flags&spropUnsigned != 0 {
 			return int(b.bits(p.nBits))
 		}

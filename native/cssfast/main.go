@@ -89,6 +89,15 @@ func main() {
 	p.unaryPropUBitVar = propUnary
 	p.serialBits = serialBits
 	p.payloadSkip = payloadSkip
+	if v := os.Getenv("SERIAL"); v != "" {
+		fmt.Sscanf(v, "%d", &p.serialBits)
+	}
+	if v := os.Getenv("ENTUNARY"); v != "" {
+		p.unaryUBitVar = v == "1"
+	}
+	if v := os.Getenv("PROPUNARY"); v != "" {
+		p.unaryPropUBitVar = v == "1"
+	}
 	p.run()
 	fmt.Fprintf(os.Stderr, "cssfast entities: classes=%d ents=%d propOK=%d propFail=%d timeline=%d frames\n",
 		worldClasses(p), worldEnts(p), worldOK(p), worldFail(p), len(p.timeline))
@@ -136,13 +145,37 @@ func main() {
 	}
 }
 
+// A real match timeline sweeps many distinct map cells across several players. A broken
+// decode produces a handful of stuck/garbage coordinates. Bucket positions into 64-unit
+// cells and require reasonable diversity before we let the preview draw them.
+func timelineTrustworthy(tl []tlFrame) bool {
+	if len(tl) < 8 {
+		return false
+	}
+	cells := map[[2]int]bool{}
+	slots := map[int]bool{}
+	for _, f := range tl {
+		for _, pl := range f.P {
+			slots[pl[0]] = true
+			cells[[2]int{pl[1] / 64, pl[2] / 64}] = true
+		}
+	}
+	// need several players AND many distinct positions relative to frame count
+	return len(slots) >= 2 && len(cells) >= 8 && len(cells) >= len(tl)/20
+}
+
 func buildResult(p *parser, netProto, demProto int, mapName, serverName, clientName string,
 	ticks, tickrate int, lay layout, clean int) result {
 	res := result{Css: true, NetProtocol: netProto, DemProtocol: demProto, MapName: mapName,
 		Tickrate: tickrate, ServerName: serverName, ClientName: clientName, Ticks: ticks,
 		Deaths: len(p.deaths), Layout: lay.String(), CleanPct: clean}
 	res.Frags = p.buildFrags(tickrate)
-	res.Timeline = p.timeline
+	// Only trust the position timeline if it actually moved. The Source-1 entity decoder
+	// can emit a single entity frozen at one garbage coordinate (which still passes the
+	// "non-zero position" gate); that must not reach the 2D/3D preview as if it were real.
+	if timelineTrustworthy(p.timeline) {
+		res.Timeline = p.timeline
+	}
 	res.PreviewStep = p.previewStep
 	if len(p.timeline) > 0 {
 		res.Roster = map[int]rosterEntry{}

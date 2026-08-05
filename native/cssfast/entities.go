@@ -37,6 +37,14 @@ type entityWorld struct {
 	decodeOK   int
 	entLog     int
 	propLog    int
+	propLogCap int
+	failLog    int
+	curEnt      int
+	curEnter    bool
+	tracePlayer bool
+	tracedOne   bool
+	traceSnap   bool
+	snapDone    bool
 	peLog      int
 	bitLog     int
 	// The entity index and the prop index deltas do not have to use the same
@@ -73,7 +81,10 @@ func flatLen(c *serverClass) int {
 
 func newEntityWorld(tables map[string]*sendTable, classes []*serverClass, dbg bool) *entityWorld {
 	w := &entityWorld{classes: classes, byID: map[int]*serverClass{}, tables: tables,
-		ents: map[int]*entity{}, baselines: map[int][]byte{}, dbg: dbg}
+		ents: map[int]*entity{}, baselines: map[int][]byte{}, dbg: dbg, propLogCap: 40}
+	if v := os.Getenv("PROPLOGCAP"); v != "" {
+		fmt.Sscanf(v, "%d", &w.propLogCap)
+	}
 	for _, c := range classes {
 		flattenClass(c, tables)
 		w.byID[c.id] = c
@@ -86,6 +97,24 @@ func newEntityWorld(tables map[string]*sendTable, classes []*serverClass, dbg bo
 		w.classBits++
 	}
 	w.classBits++
+	if dbg && os.Getenv("DBGORIGIN") != "" {
+		for _, c := range classes {
+			if c.name != "CCSPlayer" {
+				continue
+			}
+			lim := 24
+			if v := os.Getenv("FLATN"); v != "" {
+				fmt.Sscanf(v, "%d", &lim)
+			}
+			for i, fp := range c.flat {
+				if i >= lim {
+					break
+				}
+				fmt.Fprintf(os.Stderr, "  CCSPlayer flat[%d] %-44s type=%d flags=0x%05x bits=%d low=%g high=%g\n",
+					i, fp.path, fp.prop.typ, fp.prop.flags, fp.prop.nBits, fp.prop.low, fp.prop.high)
+			}
+		}
+	}
 	return w
 }
 
@@ -109,9 +138,17 @@ func (w *entityWorld) readPacketEntities(b *bitReader, updated int, isDelta bool
 			}
 		}
 	}
+	if w.dbg && os.Getenv("TRACESNAP") != "" && !isDelta && !w.snapDone {
+		w.traceSnap = true
+		w.snapDone = true
+		fmt.Fprintf(os.Stderr, "  === first full snapshot: updated=%d ===\n", updated)
+	}
 	entIdx := -1
 	for i := 0; i < updated; i++ {
 		if b.pos >= limit || b.over {
+			if w.traceSnap {
+				w.traceSnap = false
+			}
 			return
 		}
 		entIdx += 1 + int(w.ubitVar(b))
@@ -120,7 +157,10 @@ func (w *entityWorld) readPacketEntities(b *bitReader, updated int, isDelta bool
 		}
 		// entity updates arrive in ascending index order and players occupy the first
 		// slots, so once we are past them there is nothing here we need
-		if w.maxClients > 0 && entIdx > w.maxClients {
+		if w.maxClients > 0 && entIdx > w.maxClients && os.Getenv("NOCLAMP") == "" {
+			if w.traceSnap {
+				w.traceSnap = false
+			}
 			return
 		}
 		switch {
@@ -143,6 +183,11 @@ func (w *entityWorld) readPacketEntities(b *bitReader, updated int, isDelta bool
 				}
 				e := &entity{class: cls, props: map[string]interface{}{}}
 				w.ents[entIdx] = e
+				w.curEnt, w.curEnter = entIdx, true
+				if os.Getenv("TRACE1") != "" && !w.tracedOne && cls != nil && cls.name == "CCSPlayer" {
+					w.tracePlayer, w.tracedOne = true, true
+					fmt.Fprintf(os.Stderr, "  === tracing first CCSPlayer enter (ent %d) @bit %d ===\n", entIdx, b.pos)
+				}
 				if w.dbg && os.Getenv("DBGBITS") != "" && w.bitLog < 3 {
 					w.bitLog++
 					peek := &bitReader{data: b.data, pos: b.pos}
@@ -152,13 +197,26 @@ func (w *entityWorld) readPacketEntities(b *bitReader, updated int, isDelta bool
 					}
 					fmt.Fprintf(os.Stderr, "      prop-list bits @%d: %s\n", b.pos, sb.String())
 				}
+				before := b.pos
 				w.readProps(b, e, limit)
+				if w.traceSnap {
+					nm := "?"
+					if cls != nil {
+						nm = cls.name
+					}
+					fmt.Fprintf(os.Stderr, "  [%d] ent%d ENTER cls=%d %-24s bits=%d->%d (%d bits)\n", i, entIdx, clsID, nm, before, b.pos, b.pos-before)
+				}
 			} else { // delta on an existing entity
 				e := w.ents[entIdx]
 				if e == nil {
 					return // we lost track; the caller realigns on the message length
 				}
+				w.curEnt, w.curEnter = entIdx, false
+				before := b.pos
 				w.readProps(b, e, limit)
+				if w.traceSnap {
+					fmt.Fprintf(os.Stderr, "  [%d] ent%d delta bits=%d->%d (%d bits)\n", i, entIdx, before, b.pos, b.pos-before)
+				}
 			}
 		}
 	}
@@ -170,27 +228,39 @@ func (w *entityWorld) readProps(b *bitReader, e *entity, limit int) {
 		w.decodeFail++
 		return
 	}
+	if w.tracePlayer {
+		defer func() { w.tracePlayer = false }()
+	}
 	idx := -1
+	nDecoded := 0
 	for {
 		if b.pos >= limit || b.over {
 			return
 		}
 		if b.bit() == 0 {
+			if w.tracePlayer {
+				fmt.Fprintf(os.Stderr, "      [stop bit @bit %d after %d props]\n", b.pos, nDecoded)
+			}
 			break
 		}
 		idx += 1 + int(w.ubitPropVar(b))
 		if idx < 0 || idx >= len(e.class.flat) {
 			w.decodeFail++
+			if w.dbg && os.Getenv("DBGFAIL") != "" && w.failLog < 30 {
+				w.failLog++
+				fmt.Fprintf(os.Stderr, "    FAIL %s idx=%d (flatlen=%d) after %d props @bit %d\n", e.class.name, idx, len(e.class.flat), nDecoded, b.pos)
+			}
 			return
 		}
+		nDecoded++
 		fp := e.class.flat[idx]
 		v := decodeProp(b, fp.prop)
 		if v != nil {
 			e.props[fp.prop.name] = v
 		}
-		if w.dbg && w.propLog < 40 && (e.isPlayer() || os.Getenv("DBGPROP") != "") {
-			fmt.Fprintf(os.Stderr, "      prop[%d] %-44s type=%d flags=0x%x bits=%d = %v (bit %d)\n",
-				idx, fp.path, fp.prop.typ, fp.prop.flags, fp.prop.nBits, v, b.pos)
+		if w.dbg && (w.tracePlayer || w.propLog < w.propLogCap) && (e.isPlayer() || os.Getenv("DBGPROP") != "") {
+			fmt.Fprintf(os.Stderr, "      ent%d %s prop[%d] %-40s type=%d flags=0x%x bits=%d = %v (bit %d)\n",
+				w.curEnt, map[bool]string{true: "ENTER", false: "delta"}[w.curEnter], idx, fp.path, fp.prop.typ, fp.prop.flags, fp.prop.nBits, v, b.pos)
 			w.propLog++
 		}
 	}

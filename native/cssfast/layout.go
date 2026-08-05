@@ -74,6 +74,15 @@ func tune(data []byte, netProto int, mapName string, dbg bool) (layout, int) {
 								if p.descsGood {
 									score += 500
 								}
+								// protocol-appropriate map-hash size: newer engines (v77+/proto ~14+)
+								// use a 128-bit md5, older CS:S a 32-bit CRC. Getting this wrong frames
+								// cleanly but shifts every entity prop index -> garbage positions.
+								if (netProto >= 14 && mh == 128) || (netProto < 14 && mh == 32) {
+									score += 200
+								}
+								if netProto >= 14 && tu == 20 { // newer engines widened the stringtable length field
+									score += 100
+								}
 								// a layout that decodes the userinfo table gives us
 								// slot -> name, which the radar needs for labels.
 								// count distinct slots so repeated table updates

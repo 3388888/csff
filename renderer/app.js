@@ -23,7 +23,7 @@ const TAG_LABEL = {
   long_range: "long range", wallbang: "wallbang", collateral: "collateral", airshot: "airshot",
   smoke_streak: "smoke (streak)", blind_streak: "blind (streak)",
   rng: "RNG", off_height: "off height", outnumbered: "outnumbered", spin: "360 / spin",
-  jumpshot: "jumpshot", smoke_kill: "smoke kill", blind_kill: "flashed kill",
+  jumpshot: "jumpshot", pixelsurf: "pixelsurf", smoke_kill: "smoke kill", blind_kill: "flashed kill",
   bhop_run: "bhop run", fast: "fast", long_chain: "long chain", edgebug: "edgebug", jumpbug: "jumpbug", into_kill: "→ kill",
   troll: "troll 🃏", surf: "surf", flashboost: "flashboost",
 };
@@ -36,6 +36,7 @@ const CAT_DEFS = [
   { key: "clutch", label: "Clutches", tags: ["clutch"] },
   { key: "noscope", label: "Noscopes", tags: ["noscope", "jump_noscope"] },
   { key: "jumpshot", label: "Jumpshots", tags: ["jumpshot"] },
+  { key: "pixelsurf", label: "Pixelsurf", tags: ["pixelsurf"] },
   { key: "utilkill", label: "Smoke / flashed", tags: ["smoke_kill", "blind_kill"] },
   { key: "flick", label: "Flicks", tags: ["flick", "flick_hs"] },
   { key: "spin", label: "360 / spin", tags: ["spin"] },
@@ -62,7 +63,7 @@ const FRAG_DEF = { noscopeAwp: 2000, noscopeScout: 8000, noscopeAuto: 2000, scop
 
 // ---------- favorites / demopack ----------
 let favorites = {};
-const TYPE_SHORT = { ace: "ace", quad: "4k", triple: "3k", clutch: "clutch", jump_noscope: "jns", noscope: "ns", jumpshot: "jump", flick_hs: "flick", flick: "flick", spin: "360", wallbang: "wb", collateral: "collat", airshot: "airshot", smoke_kill: "smoke", blind_kill: "flashed", bhop_run: "bhop", edgebug: "edgebug", jumpbug: "jumpbug", surf: "surf", flashboost: "flashboost", troll: "troll", rng: "rng", off_height: "offheight", outnumbered: "clutch", long_range: "longrange" };
+const TYPE_SHORT = { ace: "ace", quad: "4k", triple: "3k", clutch: "clutch", jump_noscope: "jns", noscope: "ns", jumpshot: "jump", flick_hs: "flick", flick: "flick", spin: "360", wallbang: "wb", collateral: "collat", airshot: "airshot", smoke_kill: "smoke", blind_kill: "flashed", bhop_run: "bhop", edgebug: "edgebug", jumpbug: "jumpbug", surf: "surf", flashboost: "flashboost", pixelsurf: "pixelsurf", troll: "troll", rng: "rng", off_height: "offheight", outnumbered: "clutch", long_range: "longrange" };
 function favTypeShort(h) { if (h.clutchX) return "clutch1v" + h.clutchX; for (const t of (h.tags || [])) if (TYPE_SHORT[t]) return TYPE_SHORT[t]; return (h.tags && h.tags[0]) || "kill"; }
 function favDemoName(h) { return h.demoName || ((h.demPath || (current && current.demPath) || "").split(/[\\/]/).pop()) || "demo"; }
 function favKey(h) { return `${favDemoName(h)}|${h.killTick}|${h.attacker.name}|${h.type || "kill"}`; }
@@ -72,6 +73,9 @@ function favEntry(h) {
     type: favTypeShort(h), tags: h.tags || [], score: h.coolScore || 0,
     // enough to rebuild a card and a preview later, without the demo being loaded
     mapName: hMap(h) || null, round: h.round != null ? h.round : null, kills: (h.kills || []).length,
+    // the actual kills too, so the saved clip's preview can draw the kill (tracer/markers),
+    // not just player movement. compact: only what the preview reads.
+    killData: (h.kills || []).map((k) => ({ killTick: k.killTick, victim: k.victim, weapon: k.weapon, headshot: k.headshot, shot: k.shot, telemetry: k.telemetry })),
     headshots: (h.kills || []).filter((k) => k.headshot).length,
     weapons: [...new Set((h.kills || []).map((k) => k.weapon).filter(Boolean))].slice(0, 3),
     uid: (h.attacker && h.attacker.uid) != null ? h.attacker.uid : null,
@@ -191,13 +195,13 @@ async function previewFavorite(e) {
   if (uid == null) for (const f of pv.frames) { const p = f.players.find((q) => q.name === e.player); if (p) { uid = p.uid; break; } }
   const h = { mapName: e.mapName, demPath: e.demoPath, type: e.isMovement ? "movement" : "kill", round: e.round || 0,
     watchTick: e.tick, killTick: e.killTick, endTick: e.endTick, coolScore: e.score || 0, tags: e.tags || [],
-    attacker: { name: e.player, uid, team: e.team }, kills: [], preview: pv,
+    attacker: { name: e.player, uid, team: e.team }, kills: e.killData || [], preview: pv,
     css: !!e.css, label: e.label || null,
     movement: { maxSpeed: null, dmgSaved: 0, fallVel: 0 } };
   await openPreview(h);
 }
 async function openFavInGame(e) {
-  await window.api.writeVdm(e.demoPath, [{ watchTick: e.tick, killTick: e.killTick, endTick: e.endTick, attacker: { name: e.player }, tags: e.tags || [] }], {});
+  await window.api.writeVdm(e.demoPath, [{ watchTick: e.tick, killTick: e.killTick, endTick: e.endTick, attacker: { name: e.player }, tags: e.tags || [] }], { pause: !(settings && settings.pauseOnOpen === false) });
   const r = e.css ? await window.api.launchCss(e.demoPath) : await window.api.launchCsgo(e.demoPath);
   const game = e.css ? "CS:S" : "CS:GO";
   showStatus(r.ok ? `Launching ${game}… jumps to tick ${e.tick}` : (r.error || `Set the ${game} exe in Settings`));
@@ -217,6 +221,7 @@ async function exportDemopack() {
 function classifyOpts() {
   const s = settings;
   return {
+    noPreview: true, // folder scan discards previews (fetched on demand) — don't build them
     prerollSec: s.prerollSec, longRangeM: s.longRangeM, flickMinDeg: s.flickMinDeg, bhopMinSpeed: s.bhopMinSpeed,
     multikillGapSec: s.multikillGapSec, clutchMaxSec: s.clutchMaxSec, clutchMaxGapSec: s.clutchMaxGapSec, rngMaxChance: s.rngMaxChance, runMinJumps: s.runMinJumps, runMinPeak: s.runMinPeak,
     focusNamedTick: s.focusNamedTick, focusWindowSec: s.focusWindowSec, focusKeepScore: s.focusKeepScore,
@@ -300,8 +305,11 @@ function wire() {
   window.addEventListener("resize", () => { if (is3d && view) window.Preview3D.resize(); });
   $("#btnVdm").onclick = exportVdm;
   $("#coolSearch").oninput = () => renderHighlights();
-  $("#coolClear").onclick = () => { $("#coolSearch").value = ""; for (const id of ["filterMap", "filterWeapon", "filterType", "filterDist", "filterFav"]) $("#" + id).value = ""; $("#filterFocus").value = "focus"; renderHighlights(); };
-  for (const id of ["filterMap", "filterWeapon", "filterType", "filterFav", "filterFocus"]) $("#" + id).onchange = () => renderHighlights();
+  $("#coolClear").onclick = () => { $("#coolSearch").value = ""; for (const id of ["filterMap", "filterWeapon", "filterType", "filterDist", "filterFav"]) $("#" + id).value = ""; $("#filterSort").value = "score"; $("#filterFocus").value = "focus"; renderHighlights(); };
+  for (const id of ["filterMap", "filterWeapon", "filterFav", "filterSort", "filterFocus"]) $("#" + id).onchange = () => renderHighlights();
+  // selecting a kill type kicks off a one-time deep scan for it (finds more of that exact
+  // category across the folder, uncapped) — then just renders on later changes
+  $("#filterType").onchange = () => { renderHighlights(); const v = $("#filterType").value; if (v && current && current.aggregate) deepScanCategory(v); };
   $("#filterDist").oninput = () => renderHighlights();
   document.onkeydown = (e) => { if (e.key === "Escape") { closePreview(); $("#settingsModal").style.display = "none"; } };
   // click the dark backdrop (outside the box) to close
@@ -335,7 +343,7 @@ async function parseAndShow(demoPath) {
 }
 
 // signature of the DETECTION settings + classifier version — if any change, saved highlights are stale
-const CLASSIFY_VERSION = "5"; // bump when classify logic changes so the persistent store re-extracts
+const CLASSIFY_VERSION = "7"; // bump when classify logic changes so the persistent store re-extracts
 function classifySig() {
   const s = settings;
   return CLASSIFY_VERSION + JSON.stringify({ p: s.prerollSec, l: s.longRangeM, f: s.flickMinDeg, b: s.bhopMinSpeed, g: s.multikillGapSec, r: s.rngMaxChance,
@@ -357,50 +365,163 @@ async function scanFolder(force = false) {
   let saved = force ? null : await window.api.loadAggregate();
   if (saved && (saved.sig !== sig || saved.dir !== settings.demosDir)) saved = null;
   const scanned = new Set((saved && saved.scanned) || []);   // demo paths already extracted
-  let all = (saved && saved.highlights) || [];
+  let all = dedupHighlights((saved && saved.highlights) || []); // self-heal any doubled store
 
   const toScan = demos.filter((d) => !scanned.has(d.path));
   if (!toScan.length && all.length) {
     // everything already saved — instant, no cache reads
-    current = { aggregate: true, demoCount: scanned.size, skipped: 0, highlights: all };
+    current = { aggregate: true, demoCount: scanned.size, skipped: 0, highlights: all, scannedPaths: [...scanned], demos, deepDone: new Set((saved && saved.deepDone) || []) };
     renderAggregate(); hideStatus();
     showStatus(`Loaded ${all.length} highlights from ${scanned.size} demos (saved). ${demos.length} demos in folder.`);
+    backfillPixelsurf();
     return;
   }
 
-  // use ALL cores by default (decode is CPU-bound). Respect an explicit non-default setting.
-  const cores = navigator.hardwareConcurrency || 6;
-  const wantN = (settings.scanConcurrency && settings.scanConcurrency !== 6) ? settings.scanConcurrency : cores;
-  const N = Math.max(1, Math.min(wantN, 32, toScan.length));
-  let idx = 0, done = 0, ok = 0, skipped = 0;
+  // Adaptive concurrency. The saved setting is a CEILING, not a fixed count: we size the
+  // live pool to the cores actually free right now (Windows Defender's real-time scan can
+  // eat a third of them), and re-measure during the scan so it ramps up when the machine
+  // frees up and backs off when it's slammed — no more 16 workers fighting over 6 cores.
+  const hw = navigator.hardwareConcurrency || 6;
+  const cap = Math.max(1, Math.min(32, toScan.length, (settings.scanConcurrency && settings.scanConcurrency > 0) ? settings.scanConcurrency : hw));
+  // Control loop, not a one-shot "free cores" read: measuring free cores while the pool is
+  // running is a trap (the pool's own load looks like "busy" and it parks at half). Instead
+  // we RAMP UP while the machine still has spare CPU and only back off when it's saturated,
+  // so it climbs to fill idle capacity and holds a small headroom.
+  let target = Math.max(2, Math.min(cap, Math.round(hw / 2)));
+  try { const s0 = await window.api.cpuSample(250); target = Math.max(2, Math.min(cap, Math.round(hw * (s0.idlePct || 50) / 100))); } catch {}
+  async function retune() {
+    try {
+      const s = await window.api.cpuSample(250);
+      if (s.idlePct > 15) target = Math.min(cap, target + 2);      // spare CPU -> use more cores
+      else if (s.idlePct < 7) target = Math.max(2, target - 2);    // machine saturated -> ease off
+    } catch {}
+  }
+  let idx = 0, done = 0, ok = 0, skipped = 0, active = 0;
   const t0 = performance.now();
   scanning = true;
   const fresh = [];
-  showProgress(`Parsing ${toScan.length} new demo(s) — 0/${toScan.length} (×${N})${all.length ? ` · ${all.length} already saved` : ""}`, 0);
+  const resampler = setInterval(() => { if (scanning) retune(); }, 2000);
+  const prog = () => {
+    const eta = done ? ((performance.now() - t0) / done) * (toScan.length - done) / 1000 : 0;
+    showProgress(`Parsing ${toScan.length} new demo(s) — ${done}/${toScan.length} (×${target} of ≤${cap} cores)${done && done < toScan.length ? " · ~" + Math.ceil(eta) + "s left" : ""}`, done / toScan.length);
+  };
+  prog();
   async function worker() {
     while (idx < toScan.length) {
+      if (active >= target) { await new Promise((r) => setTimeout(r, 150)); continue; } // over CPU budget: hold
       const d = toScan[idx++];
+      active++;
       try {
         const r = await window.api.parseDemo(d.path, opts);
-        if (r.css) { skipped++; done++; scanned.add(d.path); continue; }
-        const demPath = r.demPath || d.path;
-        for (const h of r.highlights.slice(0, 30)) fresh.push({ ...h, preview: null, demPath, mapName: r.mapName, demoName: d.name });
-        scanned.add(d.path); ok++;
+        if (r.css) { skipped++; scanned.add(d.path); }
+        else {
+          const demPath = r.demPath || d.path;
+          for (const h of r.highlights.slice(0, 30)) fresh.push({ ...h, preview: null, demPath, mapName: r.mapName, demoName: d.name, demoDate: d.mtime || 0 });
+          scanned.add(d.path); ok++;
+        }
       } catch (e) { console.warn("skip", d.name, e.message); skipped++; }
+      finally { active--; }
       done++;
-      const eta = ((performance.now() - t0) / done) * (toScan.length - done) / 1000;
-      showProgress(`Parsing ${toScan.length} new demo(s) — ${done}/${toScan.length} (×${N})${done < toScan.length ? " · ~" + Math.ceil(eta) + "s left" : ""}`, done / toScan.length);
+      prog();
     }
   }
-  await Promise.all(Array.from({ length: N }, worker));
+  // spawn up to the ceiling; workers self-limit to the live target, so idle ones just wait
+  await Promise.all(Array.from({ length: cap }, worker));
+  clearInterval(resampler);
   scanning = false;
-  all = all.concat(fresh);
+  all = dedupHighlights(all.concat(fresh));
   all.sort((a, b) => b.coolScore - a.coolScore || a.watchTick - b.watchTick);
   // persist so the next open / filter never re-reads demo caches
   await window.api.saveAggregate({ sig, dir: settings.demosDir, scanned: [...scanned], highlights: all });
-  current = { aggregate: true, demoCount: scanned.size, skipped, highlights: all };
+  current = { aggregate: true, demoCount: scanned.size, skipped, highlights: all, scannedPaths: [...scanned], demos, deepDone: new Set() };
   renderAggregate(); hideStatus();
   if (fresh.length) showStatus(`Added ${fresh.length} highlights from ${ok} new demo(s). Total ${all.length} — saved.`);
+  backfillPixelsurf();
+}
+
+// Persist the current aggregate (highlights may have grown from a deep-scan / backfill).
+async function saveCurrentAggregate() {
+  if (!current || !current.aggregate) return;
+  try {
+    await window.api.saveAggregate({
+      sig: classifySig(), dir: settings.demosDir,
+      scanned: current.scannedPaths || [], highlights: current.highlights,
+      deepDone: [...(current.deepDone || [])],
+    });
+  } catch {}
+}
+
+// Background passes re-process cached demos and merge results into the live aggregate,
+// rendering progressively. A user-triggered deep-scan takes priority — the long pixelsurf
+// backfill yields to it (its workers pause) so selecting a category is never blocked.
+let deepActive = false;
+async function bgReprocess({ demos, optsFor, merge, label, concurrency, yieldToDeep }) {
+  if (!demos || !demos.length) return;
+  let idx = 0, done = 0; const total = demos.length;
+  const note = () => showStatus(`${label} — ${done}/${total} (background, keep using the app)`);
+  note();
+  async function worker() {
+    while (idx < total) {
+      if (yieldToDeep && deepActive) { await new Promise((r) => setTimeout(r, 400)); continue; } // let the user's deep-scan win
+      const d = demos[idx++];
+      try { const r = await window.api.parseDemo(d.path, optsFor(d)); if (r && !r.css) merge(d, r); } catch {}
+      done++;
+      if (done % 40 === 0) { note(); if (current && current.aggregate) renderHighlights(); }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.max(1, concurrency || 3) }, worker));
+  if (current && current.aggregate) { current.highlights = dedupHighlights(current.highlights); current.highlights.sort((a, b) => b.coolScore - a.coolScore || a.watchTick - b.watchTick); renderHighlights(); }
+  await saveCurrentAggregate();
+  hideStatus();
+}
+
+// Deep scan for one category: re-classify every cached demo in deep mode (finds multis a
+// bit more spread out than the fast window, uncapped) and merge the results in. Cheap —
+// reads the raw cache, no decode. Runs once per category (cached in the store).
+function demoMeta(d) { return { demPath: d.path, mapName: "", demoName: d.name, demoDate: d.mtime || 0 }; }
+async function deepScanCategory(cat) {
+  if (!current || !current.aggregate || !cat) return;
+  if (!current.deepDone) current.deepDone = new Set();
+  if (current.deepDone.has(cat) || deepActive) return;
+  deepActive = true;
+  try {
+    const demos = current.demos || (await window.api.listDemos(settings.demosDir));
+    await bgReprocess({
+      demos, concurrency: 4, label: `Deep-scanning “${TAG_LABEL[cat] || cat}” across ${demos.length} demos`,
+      optsFor: () => ({ ...classifyOpts(), deepCategory: cat }),
+      merge: (d, r) => {
+        // replace this demo's clips carrying `cat` with the deep (uncapped) set
+        current.highlights = current.highlights.filter((h) => !(h.demPath === d.path && (h.tags || []).includes(cat)));
+        for (const h of r.highlights) current.highlights.push({ ...h, preview: null, ...demoMeta(d), mapName: r.mapName });
+      },
+    });
+    current.deepDone.add(cat);
+    await saveCurrentAggregate();
+  } finally { deepActive = false; }
+}
+
+// Background pixelsurf backfill: demos still on the old (v8) cache get re-decoded to v9 so
+// pixelsurf fills in over time — no blocking 17h wall. Low concurrency + yields to deep-scan.
+let backfillActive = false;
+async function backfillPixelsurf() {
+  if (!current || !current.aggregate || backfillActive) return;
+  const demos = current.demos || (await window.api.listDemos(settings.demosDir));
+  let pending = [];
+  try { pending = await window.api.pixelsurfPending(demos.map((d) => d.path)); } catch { return; }
+  if (!pending.length) return;
+  const set = new Set(pending);
+  const todo = demos.filter((d) => set.has(d.path));
+  backfillActive = true;
+  try {
+    await bgReprocess({
+      demos: todo, concurrency: 2, yieldToDeep: true, label: `Backfilling pixelsurf (re-decoding ${todo.length} older demos)`,
+      optsFor: () => ({ ...classifyOpts(), forceDecode: true }),
+      merge: (d, r) => {
+        current.highlights = current.highlights.filter((h) => h.demPath !== d.path);
+        for (const h of r.highlights.slice(0, 30)) current.highlights.push({ ...h, preview: null, ...demoMeta(d), mapName: r.mapName });
+      },
+    });
+  } finally { backfillActive = false; }
 }
 
 function renderAggregate() {
@@ -544,7 +665,7 @@ async function openCssFrag(f) {
   const tr = current.tickrate || 66;
   const pre = Math.round(tr * ((settings && settings.prerollSec) || 1.5));
   const end = (f.endTick || f.tick) + tr * 3;
-  await window.api.writeVdm(current.demPath, [{ watchTick: Math.max(0, f.tick - pre), killTick: f.tick, endTick: end, attacker: { name: f.player }, tags: [f.desc] }], {});
+  await window.api.writeVdm(current.demPath, [{ watchTick: Math.max(0, f.tick - pre), killTick: f.tick, endTick: end, attacker: { name: f.player }, tags: [f.desc] }], { pause: !(settings && settings.pauseOnOpen === false) });
   const r = await window.api.launchCss(current.demPath);
   showStatus(r.ok ? "Launching CS:S… jumps to tick " + f.tick : (r.error || "Set CS:S exe in Settings") + "  (VDM written next to the demo.)");
 }
@@ -571,6 +692,36 @@ function stars(score) { const n = score >= 100 ? 5 : score >= 70 ? 4 : score >= 
 function teamCls(tn) { return tn === 3 ? "ct" : "t"; }
 
 function hMap(h) { return h.mapName || (current && current.mapName) || ""; }
+function fmtDate(ms) {
+  if (!ms) return "";
+  const d = new Date(ms), now = Date.now();
+  const days = Math.floor((now - ms) / 86400000);
+  const rel = days <= 0 ? "today" : days === 1 ? "yesterday" : days < 30 ? days + "d ago" : days < 365 ? Math.floor(days / 30) + "mo ago" : Math.floor(days / 365) + "y ago";
+  return `${d.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })} (${rel})`;
+}
+// The real match date lives in the filename (pug_2026-03-16_0153_…, faceit_20260316_…) —
+// file mtime is unreliable (copying/extracting resets it to "recent"). Parse the name;
+// fall back to the stored mtime only if there's no date in it. A bare year inside a map
+// name ("de_nuke_2023") is NOT a date — we require yyyy-mm-dd (or a compact yyyymmdd).
+function parseNameDate(name) {
+  if (!name) return 0;
+  let m = name.match(/(20\d{2})[-_.](0[1-9]|1[0-2])[-_.](0[1-9]|[12]\d|3[01])(?:[-_ tT]?([0-2]\d)[-_:.]?([0-5]\d))?/);
+  if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3], m[4] ? +m[4] : 12, m[5] ? +m[5] : 0);
+  m = name.match(/(?<!\d)(20\d{2})(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])(?!\d)/);
+  if (m) return Date.UTC(+m[1], +m[2] - 1, +m[3], 12, 0);
+  return 0;
+}
+function hlDate(h) { return parseNameDate(h.demoName) || h.demoDate || 0; }
+function hlClipSec(h) { return Math.max(0, (h.endTick || 0) - (h.watchTick || 0)) / (h.tickrate || current && current.tickrate || 64); }
+// De-dup the aggregate: a highlight is uniquely a (demo, round, moment, attacker, tags)
+// tuple. Guards against any merge path re-adding the same clip (a deep-scan bug once
+// doubled the whole store), and self-heals an already-doubled store on load.
+function hlKey(h) { return (h.demPath || "") + "|" + h.round + "|" + h.watchTick + "|" + ((h.attacker && h.attacker.name) || "") + "|" + (h.tags || []).join(","); }
+function dedupHighlights(arr) {
+  const seen = new Set(); const out = [];
+  for (const h of arr || []) { const k = hlKey(h); if (seen.has(k)) continue; seen.add(k); out.push(h); }
+  return out;
+}
 function hWeapons(h) { return (h.kills || []).map((k) => k.weapon).filter(Boolean); }
 function hMaxDistM(h) { return Math.max(0, ...(h.kills || []).map((k) => k.distM || 0)); }
 
@@ -583,8 +734,22 @@ function highlightVisible(h, f) {
   }
   if (!h.tags.some((t) => !f.disabled.has(tagToCat[t] || t))) return false;
   if (f.map && hMap(h) !== f.map) return false;
-  if (f.weapon && !hWeapons(h).includes(f.weapon)) return false;
-  if (f.type && !h.tags.includes(f.type)) return false;
+  // weapon filter is "pure" by default: a selected weapon means EVERY kill in the clip used
+  // it, so "deagle" + an ace shows a real deagle ace, not a 2-deagle/2-ak/1-knife salad.
+  // With "broaden" on, it matches any clip that CONTAINS a kill with that weapon.
+  if (f.weapon) {
+    const ks = h.kills || [];
+    if (!ks.length) return false;
+    const ok = f.broaden ? ks.some((k) => k.weapon === f.weapon) : ks.every((k) => k.weapon === f.weapon);
+    if (!ok) return false;
+  }
+  // type filter: the clip's own tags, plus (when broadening) any per-kill tag — so a
+  // collateral or noscope buried inside a bigger multikill still matches.
+  if (f.type) {
+    const inHl = h.tags.includes(f.type);
+    const inKill = f.broaden && (h.kills || []).some((k) => (k.tags || []).includes(f.type));
+    if (!inHl && !inKill) return false;
+  }
   if (f.minDist && hMaxDistM(h) < f.minDist) return false;
   if (f.fav && !favorites[favKey(h)]) return false;
   if (f.focus && h.offFocus) return false;   // demo named after a tick -> only that moment
@@ -619,6 +784,8 @@ function currentFilters() {
     type: $("#filterType") ? $("#filterType").value : "",
     minDist: $("#filterDist") ? (parseInt($("#filterDist").value) || 0) : 0,
     fav: $("#filterFav") ? $("#filterFav").value === "fav" : false,
+    sort: $("#filterSort") ? $("#filterSort").value : "score",
+    broaden: !!(settings && settings.broadenSearch),
     focus: $("#filterFocus") ? $("#filterFocus").value === "focus" : true,
   };
 }
@@ -626,6 +793,12 @@ function currentFilters() {
 function renderHighlights() {
   const f = currentFilters();
   const list = current.highlights.filter((h) => highlightVisible(h, f));
+  // default order is best-score-first (already pre-sorted); date (from filename) and
+  // clip-length sorts help find old kills / long spread-out aces.
+  if (f.sort === "new") list.sort((a, b) => hlDate(b) - hlDate(a) || b.coolScore - a.coolScore);
+  else if (f.sort === "old") list.sort((a, b) => hlDate(a) - hlDate(b) || b.coolScore - a.coolScore);
+  else if (f.sort === "long") list.sort((a, b) => hlClipSec(b) - hlClipSec(a) || b.coolScore - a.coolScore);
+  else if (f.sort === "short") list.sort((a, b) => hlClipSec(a) - hlClipSec(b) || b.coolScore - a.coolScore);
   $("#coolCount").textContent = "(" + list.length + (list.length !== current.highlights.length ? " of " + current.highlights.length : "") + ")";
   const box = $("#coolList"); box.innerHTML = "";
   if (!list.length) { box.appendChild(el("div", "muted", "No highlights match the filter.")); return; }
@@ -642,7 +815,10 @@ function renderHighlights() {
     const n = h.kills.length;
     if (h.type === "movement") {
       const ml = h.tags.includes("edgebug") ? "edgebug" : h.tags.includes("jumpbug") ? "jumpbug" : h.tags.includes("surf") ? "surf" : h.tags.includes("flashboost") ? "flashboost" : "bhop run";
-      who.innerHTML = `${esc(h.attacker.name)} <span class="vic">— ${ml}</span>`;
+      // if it flows into a kill, show the actual kill (weapon → victim), not a vague "→ kill"
+      const k0 = h.kills && h.kills[0];
+      const killPart = k0 ? ` ${window.modifierIcons(k0)}${window.weaponIcon(k0.weapon)}${k0.headshot ? window.headshotIcon() : ""} <span class="vic">→ ${esc(k0.victim.name)}</span>` : "";
+      who.innerHTML = `${esc(h.attacker.name)} <span class="vic">— ${ml}</span>${killPart}`;
     } else if (n > 1) {
       who.innerHTML = `${esc(h.attacker.name)} <span class="vic">— ${n} kills</span>`;
     } else {
@@ -657,6 +833,7 @@ function renderHighlights() {
     if (h.focusTick) { const c = el("span", "chip hot", "◎ tick " + h.focusTick); c.title = "this is the moment named in the filename"; tags.appendChild(c); }
     else if (h.keptAnyway) { const c = el("span", "chip", "elsewhere in demo"); c.title = "not the named tick, kept because it scored high enough"; tags.appendChild(c); }
     for (const tg of h.tags) {
+      if (tg === "into_kill") continue; // redundant "→ kill" label; the kill is shown in the header
       const chip = el("span", "chip clickable" + (HOT.has(tg) ? " hot" : ""), tagLabel(tg, h));
       chip.title = "filter by " + (TAG_LABEL[tg] || tg);
       chip.onclick = () => { $("#coolSearch").value = tg.replace(/_/g, " "); renderHighlights(); };
@@ -680,12 +857,14 @@ function renderHighlights() {
     const meta = el("div", "meta");
     const bits = [];
     if (h.demoName) bits.push(`${h.mapName} · ${h.demoName.replace(/\.dem$/i, "")}`);
+    { const dt = hlDate(h); if (dt) bits.push(fmtDate(dt)); }
     if (h.type === "movement") {
       const m = h.movement;
-      if (h.tags.includes("flashboost")) { bits.push(`flashboost → ${m.maxSpeed} u/s`, `+${m.boost} u/s spike`); if (m.killAfter && h.kills[0]) bits.push(`→ ${h.kills[0].weapon} kill`); }
-      else if (h.tags.includes("surf")) { bits.push(`surf · max ${m.maxSpeed} u/s`, `${m.durSec}s`, `${m.distUnits}u`); if (m.killAfter && h.kills[0]) bits.push(`→ ${h.kills[0].weapon} kill`); }
+      // the kill (if any) is shown in the header now; here we just show the movement metrics
+      if (h.tags.includes("flashboost")) bits.push(`flashboost → ${m.maxSpeed} u/s`, `+${m.boost} u/s spike`);
+      else if (h.tags.includes("surf")) bits.push(`surf · max ${m.maxSpeed} u/s`, `${m.durSec}s`, `${m.distUnits}u`);
       else if (m.maxSpeed != null) bits.push(`max ${m.maxSpeed} u/s`, `avg ${m.avgSpeed}`, `${m.jumps} jumps`, `${m.airPct}% air`, `${m.durSec}s`);
-      else if (m.fallVel != null) { bits.push(`saved ~${m.dmgSaved} dmg (${m.fallVel} u/s fall)`); if (m.killAfter && h.kills[0]) bits.push(`→ ${h.kills[0].weapon} kill`); }
+      else if (m.fallVel != null) bits.push(`saved ~${m.dmgSaved} dmg (${m.fallVel} u/s fall)`);
       bits.push(`watch tick ${h.watchTick}`);
       for (const b of bits) meta.appendChild(el("span", null, b));
       card.appendChild(meta);
@@ -1037,12 +1216,14 @@ function stopAnim() { if (anim) cancelAnimationFrame(anim); anim = null; $("#pla
 // ---------- CS:GO / VDM ----------
 async function openInCsgo(h) {
   const demPath = h.demPath || current.demPath;
-  await window.api.writeVdm(demPath, [h], {});
+  const pause = !(settings && settings.pauseOnOpen === false); // default on: pause at the clip start
+  if (/\.bz2$/i.test(demPath)) showStatus("Extracting compressed demo… (first time only)");
+  await window.api.writeVdm(demPath, [h], { pause });
   // a CS:S demo has to go to CS:S — the VDM is the same, only the exe differs
   const css = !!(h.css || (current && current.css && demPath === current.demPath));
   const r = css ? await window.api.launchCss(demPath) : await window.api.launchCsgo(demPath);
   const game = css ? "CS:S" : "CS:GO";
-  showStatus(r.ok ? `Launching ${game}… jumps to tick ${h.watchTick}`
+  showStatus(r.ok ? `Launching ${game}… jumps to tick ${h.watchTick}${pause ? " (paused — press play / demo_resume)" : ""}`
     : (r.error || `Set the ${game} exe in Settings`) + "  (VDM written next to the demo.)");
 }
 async function exportVdm() {
@@ -1102,6 +1283,8 @@ async function openSettings() {
   $("#setCsgo").value = s.csgoExe || ""; $("#setHlae").value = s.hlaeExe || ""; $("#setCss").value = s.cssExe || ""; $("#setNetcon").value = s.csgoNetconPort || "";
   $("#setDemos").value = s.demosDir || ""; $("#setPreroll").value = s.prerollSec; $("#setConc").value = s.scanConcurrency;
   $("#setMaps").value = s.mapsDir || ""; $("#setMaps2").value = s.mapsDir2 || ""; $("#setPrefer3d").checked = s.prefer3d !== false;
+  $("#setBroaden").checked = !!s.broadenSearch;
+  $("#setPauseOnOpen").checked = s.pauseOnOpen !== false;
   $("#setGap").value = s.multikillGapSec ?? 8; $("#setClutchMax").value = s.clutchMaxSec ?? 45; $("#setClutchGap").value = s.clutchMaxGapSec ?? 20;
   $("#setFocus").checked = s.focusNamedTick !== false; $("#setFocusWin").value = s.focusWindowSec ?? 15; $("#setFocusScore").value = s.focusKeepScore ?? 85;
   $("#setFlick").value = s.flickMinDeg;
@@ -1127,7 +1310,7 @@ async function saveSettings() {
     csgoExe: $("#setCsgo").value.trim(), hlaeExe: $("#setHlae").value.trim(), cssExe: $("#setCss").value.trim(), csgoNetconPort: $("#setNetcon").value.trim(), demosDir: $("#setDemos").value.trim(),
     prerollSec: parseFloat($("#setPreroll").value) || 1, flickMinDeg: parseInt($("#setFlick").value) || 22,
     deleteBz2: $("#setDelBz2").checked, disabledCats,
-    mapsDir: $("#setMaps").value.trim(), mapsDir2: $("#setMaps2").value.trim(), prefer3d: $("#setPrefer3d").checked,
+    mapsDir: $("#setMaps").value.trim(), mapsDir2: $("#setMaps2").value.trim(), prefer3d: $("#setPrefer3d").checked, broadenSearch: $("#setBroaden").checked, pauseOnOpen: $("#setPauseOnOpen").checked,
     multikillGapSec: Math.max(0.5, parseFloat($("#setGap").value) || 8), clutchMaxSec: Math.max(5, parseInt($("#setClutchMax").value) || 45),
     clutchMaxGapSec: Math.max(1, parseInt($("#setClutchGap").value) || 20),
     focusNamedTick: $("#setFocus").checked, focusWindowSec: Math.max(1, parseInt($("#setFocusWin").value) || 15),
