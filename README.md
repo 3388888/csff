@@ -33,7 +33,9 @@ ranked by score, and gives you a menu:
 
 The core (scan + rank + list + jump-to-clip) needs **no downloads** — the previews are the only add-ons.
 
-Build it yourself: `cd native/cli && go build -o ../../CSGO-Highlights-Console.exe .`
+Build it yourself: run **`build-console.cmd`** (compiles it, and if you drop
+[`upx.exe`](https://github.com/upx/upx/releases) next to the script it shrinks the exe from
+~14 MB to ~3.5 MB). Or plain: `cd native/cli && go build -ldflags="-s -w" -trimpath -o ../../CSGO-Highlights-Console.exe .`
 
 ---
 
