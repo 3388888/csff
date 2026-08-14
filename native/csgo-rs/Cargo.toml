@@ -1,0 +1,40 @@
+[package]
+name = "csgo-rs"
+version = "0.1.0"
+edition = "2021"
+description = "One-binary demo frag finder: CS:GO + CS:S (hand-rolled, no deps), CS2 via optional feature"
+
+[lib]
+name = "csgo_rs"
+path = "src/lib.rs"
+
+[[bin]]
+name = "csgo-rs"
+path = "src/main.rs"
+
+[dependencies]
+# CS2 (Source 2 / PBDEMS2) support is opt-in: it pulls in LaihoE/demoparser (heavy, needs
+# protoc). The default build stays lean CS:GO+CS:S with zero deps.
+parser = { git = "https://github.com/LaihoE/demoparser", optional = true }
+ahash = { version = "0.8", optional = true }
+# `app` feature: emit the csgofast-compatible gzipped raw JSON so the Electron app can use
+# this Rust binary as a drop-in decoder (parse-worker.js).
+serde = { version = "1", features = ["derive"], optional = true }
+serde_json = { version = "1", optional = true }
+flate2 = "1"
+
+[features]
+# Core default: parse demos + classify highlights. Nothing else compiles in.
+default = []
+# Parser modules (per game generation)
+cs2 = ["dep:parser", "dep:ahash"]
+# Map geometry out of a .bsp (needed by the 3D preview and by map export)
+bsp = []
+# Game-asset extraction: VPK archives, MDL/VVD/VTX models, VTF textures, VMT materials
+assets = []
+# glTF export for Blender / UE — needs geometry + assets to be worth anything
+export3d = ["bsp", "assets"]
+# raw JSON emit for the desktop app's classify path
+app = ["dep:serde", "dep:serde_json"]
+# convenience: everything
+full = ["bsp", "assets", "export3d", "app"]

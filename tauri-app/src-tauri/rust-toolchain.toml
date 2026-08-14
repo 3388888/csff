@@ -1,0 +1,4 @@
+# Force the GNU toolchain for this app so `cargo tauri dev` / `cargo run` use the MinGW
+# linker (the machine has no MSVC link.exe). Without this, the build fails on link.exe.
+[toolchain]
+channel = "stable-x86_64-pc-windows-gnu"

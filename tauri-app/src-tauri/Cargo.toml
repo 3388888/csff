@@ -1,0 +1,23 @@
+[package]
+name = "demo-highlights"
+version = "0.1.0"
+edition = "2021"
+description = "CSGO Demo Highlights — Tauri (Rust) shell"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# the parser/classify engine — called in-process, no subprocess.
+# package is `csgo-rs`; the library crate it exposes is `csgo_rs` (used in main.rs).
+csgo-rs = { path = "../../native/csgo-rs", features = ["app", "bsp", "assets", "export3d"] }
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true

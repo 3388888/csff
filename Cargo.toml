@@ -1,0 +1,20 @@
+# Workspace root. The point of splitting these out is that the CORE scanner (demo parsing +
+# classify) must be buildable and shippable on its own — everything heavier (game-asset
+# extraction, 3D export, the desktop UI) is an opt-in layer on top of it.
+#
+#   native/csgo-rs      — core: demo parsing, classify, CS:S/CS:GO (+ CS2 behind a feature)
+#   tauri-app/src-tauri — the desktop app; depends on core and turns on the extra features
+[workspace]
+resolver = "2"
+members = [
+    "native/csgo-rs",
+    "tauri-app/src-tauri",
+]
+
+# One shared release profile so a module built here matches one built there.
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+panic = "abort"
+codegen-units = 1
