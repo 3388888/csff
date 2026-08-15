@@ -1218,6 +1218,33 @@ async fn maps_geo(app: tauri::AppHandle, map: String) -> Value {
         };
         match csgo_rs::bspgeo::map_geo(&bsp.to_string_lossy()) {
             Some(blob) => {
+                // Bake static props (rails, crates, clutter) into the preview geometry. Brush
+                // faces alone leave a map looking like it's missing walls and railings.
+                let sset = store_read(&app, "settings.json");
+                let blob = match sset.get("gameDir").and_then(|v| v.as_str()).filter(|s| !s.trim().is_empty()) {
+                    Some(gd) => {
+                        let packs = csgo_rs::vpk::open_game_dir(gd);
+                        csgo_rs::bspgeo::append_props(
+                            &blob,
+                            &bsp.to_string_lossy(),
+                            |model| {
+                                let base = model.trim_end_matches(".mdl");
+                                let vvd = csgo_rs::vpk::read_any(&packs, &format!("{base}.vvd"))?;
+                                let vtx = csgo_rs::vpk::read_any(&packs, &format!("{base}.dx90.vtx"))
+                                    .or_else(|| csgo_rs::vpk::read_any(&packs, &format!("{base}.dx80.vtx")))
+                                    .or_else(|| csgo_rs::vpk::read_any(&packs, &format!("{base}.vtx")))?;
+                                let mdlb = csgo_rs::vpk::read_any(&packs, &format!("{base}.mdl"));
+                                let mesh = match &mdlb {
+                                    Some(mb) => csgo_rs::mdl::mesh_from_mdl(mb, &vvd, &vtx)?,
+                                    None => csgo_rs::mdl::mesh_from(&vvd, &vtx)?,
+                                };
+                                Some(mesh.idx.iter().map(|&i| mesh.pos[i as usize]).collect())
+                            },
+                            400_000,
+                        )
+                    }
+                    None => blob,
+                };
                 let tri = u32::from_le_bytes(blob[4..8].try_into().unwrap());
                 if let Some(d) = cache.parent() { let _ = fs::create_dir_all(d); }
                 let _ = fs::write(&cache, &blob);

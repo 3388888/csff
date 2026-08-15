@@ -44,11 +44,23 @@ void main() {
   vec3 toCam = uCam - vW;
   vec3 n = normalize(cross(dFdx(vW), dFdy(vW)));
   if (dot(n, toCam) < 0.0) n = -n;
-  vec3 L = normalize(vec3(0.35, 0.42, 0.84));
-  float lam = 0.32 + 0.68 * max(dot(n, L), 0.0);
-  // gentle per-64u break-up so big flat brushes still read as surfaces
+  // MATTE CLAY LOOK: one neutral base colour for the whole map, shaped purely by light.
+  // Per-material palette colours made a low-poly map read as noise; a single matte surface
+  // with real directional shading + a sky/ground hemisphere term reads as form instead.
+  vec3 L = normalize(vec3(0.42, 0.35, 0.84));   // key light, high and slightly off-axis
+  float ndl = max(dot(n, L), 0.0);
+  float key = pow(ndl, 0.85);                    // softened falloff = matte, not plastic
+  // hemisphere ambient: brighter from above, darker from below, so floors/ceilings separate
+  float hemi = 0.5 + 0.5 * n.z;
+  // rim term keeps silhouettes readable against the fog
+  float rim = pow(1.0 - max(dot(n, normalize(toCam)), 0.0), 3.0) * 0.16;
+  // fake contact shading: surfaces facing away from the key darken toward a cool shadow tone
+  vec3 lit    = vec3(0.86, 0.86, 0.88);
+  vec3 shadow = vec3(0.17, 0.18, 0.22);
+  vec3 c = mix(shadow, lit, clamp(0.22 * hemi + 0.78 * key, 0.0, 1.0)) + rim;
+  // very light per-64u variation so huge flat brushes still read as surfaces
   float h = fract(sin(dot(floor(vW * 0.0625), vec3(12.9898, 78.233, 37.719))) * 43758.5453);
-  vec3 c = uPal[vMat] * (lam * (0.93 + 0.14 * h));
+  c *= 0.97 + 0.06 * h;
   float fog = clamp((length(toCam) - uFogNear) / max(uFogFar - uFogNear, 1.0), 0.0, 1.0);
   o = vec4(mix(c, uFog, fog * 0.9), 1.0);
 }`;

@@ -654,151 +654,109 @@ function renderMatch() {
   $("#favView").style.display = "none";
   $("#matchView").style.display = "block";
   document.querySelector(".col-left").style.display = "";
-  const h = current.header, hd = $("#matchHeader"); hd.innerHTML = "";
+  const h = current.header || {}, hd = $("#matchHeader"); hd.innerHTML = "";
   hd.appendChild(el("div", "map", current.mapName));
-  const sc = el("div", "score"); sc.innerHTML = `<span class="ct">CT ${current.score.ct}</span> : <span class="t">${current.score.t} T</span>`;
+  const sc = el("div", "score"); const sco = current.score || { ct: 0, t: 0, rounds: 0 };
+  sc.innerHTML = `<span class="ct">CT ${sco.ct || 0}</span> : <span class="t">${sco.t || 0} T</span>`;
   hd.appendChild(sc);
-  hd.appendChild(el("div", "sub", `${current.score.rounds} rounds · ${current.tickrate} tick`));
+  hd.appendChild(el("div", "sub", `${sco.rounds || 0} rounds · ${current.tickrate || 64} tick`));
   if (current.tickHints && current.tickHints.length) {
     const s = el("div", "sub focus-note", `◎ named tick ${current.tickHints.join(", ")} — showing that moment (switch the last filter to “everything” for the rest)`);
     hd.appendChild(s);
   }
-  hd.appendChild(el("div", "sub", h.serverName));
+  if (h.serverName) hd.appendChild(el("div", "sub", h.serverName));
   renderScoreboard(); renderRoundBreakdown(); populateFilters(); renderHighlights();
 }
 
 function renderRoundBreakdown() {
   const box = $("#roundView"); box.innerHTML = "";
-  const rounds = current.score.rounds;
+  const rounds = (current.score && current.score.rounds) || 0;
   const winners = current.roundWinners || [];
-  const t = el("table", "rounds");
-  // header: round numbers
-  let head = "<tr><th class='pname'></th>";
-  for (let r = 0; r < rounds; r++) head += `<th title='round ${r + 1}'>${r + 1}</th>`;
-  head += "<th class='tot'>K</th></tr>";
-  // winner row
-  let win = "<tr class='winrow'><td class='pname'>winner</td>";
-  for (let r = 0; r < rounds; r++) { const w = winners[r]; const c = w === 3 ? "ct" : w === 2 ? "t" : ""; win += `<td class='wc ${c}' title='${w === 3 ? "CT" : w === 2 ? "T" : "?"}'></td>`; }
-  win += "<td></td></tr>";
-  let body = "";
-  for (const p of current.players) {
-    const rk = p.roundKills || [], rh = p.roundHs || [];
-    body += `<tr><td class='pname clickable' data-name='${esc(p.name)}'>${esc(p.name)}</td>`;
-    for (let r = 0; r < rounds; r++) {
-      const k = rk[r] || 0, hs = rh[r] || 0;
-      const cls = k >= 3 ? "k3" : k === 2 ? "k2" : k === 1 ? "k1" : "";
-      body += `<td class='kc ${cls}' title='round ${r + 1}: ${k} kill${k !== 1 ? "s" : ""}${hs ? ", " + hs + " HS" : ""}'>${k || ""}</td>`;
-    }
-    body += `<td class='tot'>${p.kills}</td></tr>`;
+  const players = current.players || [];
+  if (!rounds || !players.length) {
+    box.appendChild(el("div", "muted", "No round data for this demo."));
+    return;
   }
-  t.innerHTML = head + win + body;
-  box.appendChild(t);
-  box.querySelectorAll(".pname.clickable").forEach((c) => { c.onclick = () => { $("#coolSearch").value = c.dataset.name; renderHighlights(); }; });
-}
+  // CS:GO's match timeline: one column per round, one lane per player, a pip per kill.
+  // Reading a table of numbers is work; a lane you can scan shows who carried which rounds.
+  const grid = el("div", "tl");
 
-// CS:S game version by network protocol (what the demo was recorded on)
-const CSS_VER = { 7: "v34", 8: "v34", 14: "v77", 15: "v77", 24: "v93/v94" };
-
-function renderCss() {
-  $("#empty").style.display = "none"; $("#favView").style.display = "none"; $("#matchView").style.display = "block";
-  document.querySelector(".col-left").style.display = "none";
-  const hd = $("#matchHeader"); hd.innerHTML = "";
-  hd.appendChild(el("div", "map", current.mapName || "CS:S demo"));
-  const np = current.netProtocol;
-  const via = (np ? `CS:S ${CSS_VER[np] || "protocol " + np} · protocol ${np}` : "CS:S (via cssff)") +
-    (current.hasPositions ? " · positions decoded" : np ? " · no positions on this protocol yet" : "");
-  hd.appendChild(el("div", "sub", `${current.frags.length} frags · ${via}`));
-  if (current.header && current.header.serverName) hd.appendChild(el("div", "sub", current.header.serverName));
-  $("#coolCount").textContent = "(" + current.frags.length + ")";
-  const box = $("#coolList"); box.innerHTML = "";
-  if (!current.frags.length) { box.appendChild(el("div", "muted", "No frags found in this demo.")); return; }
-  const tr = current.tickrate || 66;
-  current.frags.forEach((f, i) => {
-    const card = el("div", "ck");
-    const top = el("div", "top");
-    top.appendChild(el("div", "rank", "#" + (i + 1)));
-    const who = el("div", "who");
-    const icons = (f.weapon || "").split("/").filter(Boolean).map((w) => window.weaponIcon(w)).join("");
-    who.innerHTML = `<span class="${teamCls(f.team)}">${esc(f.player)}</span> ${icons} <span class="vic">${esc(f.desc)}</span>`;
-    top.appendChild(who);
-    if (f.kills >= 3) top.appendChild(el("div", "stars", "★".repeat(Math.min(5, f.kills))));
-    card.appendChild(top);
-    const tags = el("div", "tags");
-    if (f.kills) tags.appendChild(el("span", "chip" + (f.kills >= 4 ? " hot" : ""), f.kills + "K"));
-    if (f.headshots) tags.appendChild(el("span", "chip", f.headshots + " HS"));
-    if (f.spanSec) tags.appendChild(el("span", "chip", f.spanSec + "s"));
-    if (tags.children.length) card.appendChild(tags);
-    const meta = el("div", "meta");
-    if (f.round != null) meta.appendChild(el("span", null, "round " + (f.round + 1)));
-    meta.appendChild(el("span", null, `tick ${f.tick}` + (f.endTick && f.endTick !== f.tick ? ` → ${f.endTick}` : "")));
-    meta.appendChild(el("span", null, `${Math.floor(f.tick / tr / 60)}:${String(Math.floor((f.tick / tr) % 60)).padStart(2, "0")}`));
-    card.appendChild(meta);
-    const act = el("div", "actions");
-    if (current.hasPositions) {
-      const pv = el("button", "mini", "▶ Preview"); pv.onclick = () => previewCssFrag(f); act.appendChild(pv);
-    }
-    const cs = el("button", "mini" + (current.hasPositions ? " ghost" : ""), "Open in CS:S"); cs.onclick = () => openCssFrag(f); act.appendChild(cs);
-    const rv = el("button", "mini ghost", "Show demo file"); rv.onclick = () => window.api.showItem(current.demPath); act.appendChild(rv);
-    act.appendChild(favBtn(cssFragH(f))); // CS:S clips can go in the demopack too
-    card.appendChild(act); box.appendChild(card);
-  });
-}
-// A cssfast frag in the shape the rest of the app speaks (preview, favorites, VDM).
-// There's no per-kill list on this side, so `label` carries cssff's own description.
-function cssFragH(f) {
-  const tr = current.tickrate || 66;
-  const pre = Math.round(tr * ((settings && settings.prerollSec) || 1.5));
-  return {
-    mapName: current.mapName, demPath: current.demPath, type: "kill", round: f.round || 0,
-    watchTick: Math.max(0, f.tick - pre), killTick: f.tick, endTick: (f.endTick || f.tick) + tr * 3,
-    coolScore: (f.kills || 0) * 10 + (f.headshots || 0) * 5, tickrate: tr, css: true,
-    tags: f.kills >= 5 ? ["ace"] : f.kills === 4 ? ["quad"] : f.kills === 3 ? ["triple"] : [],
-    label: (f.desc || (f.kills ? f.kills + "K" : "clip")).slice(0, 70),
-    attacker: { name: f.player, uid: null, team: f.team }, kills: [],
-  };
-}
-// CS:S clips play back through the same 2D radar / 3D view as CS:GO — the positions come
-// out of the demo's entity stream and are cached in the same shape.
-async function previewCssFrag(f) {
-  const h = cssFragH(f);
-  showStatus("Loading preview…");
-  const pv = await window.api.getFrames(current.demPath, h.watchTick, h.endTick, (settings && settings.maxPreviewSec) || 25, f.round);
-  if (!pv || !pv.frames || !pv.frames.length) { showStatus("No position data for this clip."); return; }
-  hideStatus();
-  // the radar/3D camera follows by uid, and cssfast keys players by userID
-  for (const [uid, r] of Object.entries(pv.roster || {})) if (r && r.name === f.player) { h.attacker.uid = +uid; break; }
-  if (h.attacker.uid == null) {
-    for (const fr of pv.frames) { const p = fr.players.find((q) => q.name === f.player); if (p) { h.attacker.uid = p.uid; break; } }
+  // header lane: round number + who won it
+  const hdr = el("div", "tl-row tl-hdr");
+  hdr.appendChild(el("div", "tl-name", ""));
+  for (let r = 0; r < rounds; r++) {
+    const c = el("div", "tl-cell");
+    const w = winners[r];
+    c.className = "tl-cell " + (w === 3 ? "win-ct" : w === 2 ? "win-t" : "");
+    c.textContent = r + 1;
+    c.title = `round ${r + 1}${w === 3 ? " — CT" : w === 2 ? " — T" : ""}`;
+    hdr.appendChild(c);
   }
-  h.preview = pv;
-  await openPreview(h);
-}
+  grid.appendChild(hdr);
 
-async function openCssFrag(f) {
-  const tr = current.tickrate || 66;
-  const pre = Math.round(tr * ((settings && settings.prerollSec) || 1.5));
-  const end = (f.endTick || f.tick) + tr * 3;
-  await window.api.writeVdm(current.demPath, [{ watchTick: Math.max(0, f.tick - pre), killTick: f.tick, endTick: end, attacker: { name: f.player }, tags: [f.desc] }], { pause: !(settings && settings.pauseOnOpen === false) });
-  const r = await window.api.launchCss(current.demPath);
-  showStatus(r.ok ? "Launching CS:S… jumps to tick " + f.tick : (r.error || "Set CS:S exe in Settings") + "  (VDM written next to the demo.)");
+  // kills per player per round, straight from the highlight list
+  const byPlayer = {};
+  for (const h of (current.highlights || [])) {
+    const n = h.attacker && h.attacker.name;
+    if (!n) continue;
+    (byPlayer[n] = byPlayer[n] || {});
+    for (const k of (h.kills || [])) {
+      const r = h.round != null ? h.round : 0;
+      byPlayer[n][r] = (byPlayer[n][r] || 0) + 1;
+    }
+  }
+  for (const [tn] of [[3], [2]]) {
+    for (const p of players.filter((x) => x.team === tn).sort((a, b) => (b.kills || 0) - (a.kills || 0))) {
+      const row = el("div", "tl-row");
+      const nm = el("div", "tl-name " + TEAM[tn], p.name);
+      nm.title = p.name;
+      nm.onclick = () => { $("#coolSearch").value = p.name; renderHighlights(); };
+      row.appendChild(nm);
+      const mine = byPlayer[p.name] || {};
+      for (let r = 0; r < rounds; r++) {
+        const n = mine[r] || 0;
+        const c = el("div", "tl-cell k" + Math.min(n, 5));
+        if (n) { c.textContent = n; c.title = `${p.name} — ${n} kill${n > 1 ? "s" : ""} in round ${r + 1}`; }
+        row.appendChild(c);
+      }
+      grid.appendChild(row);
+    }
+  }
+  box.appendChild(grid);
 }
 
 function renderScoreboard() {
   const box = $("#scoreboard"); box.innerHTML = "";
-  const t = el("table", "sb");
-  t.innerHTML = `<tr><th class="name">Player</th><th>K</th><th>D</th><th>A</th><th>HS%</th><th>ADR</th><th>K/D</th><th>MVP</th></tr>`;
+  const sco = current.score || {};
+  const all = current.players || [];
+  // CS:GO orders each side by kills and shows the team's round wins in the header bar
   for (const [tn, label] of [[3, "CT"], [2, "T"]]) {
-    const ps = current.players.filter((p) => p.team === tn);
+    const ps = all.filter((p) => p.team === tn).sort((a, b) => (b.kills || 0) - (a.kills || 0));
     if (!ps.length) continue;
-    const hr = el("tr", "teamhdr"); const td = el("td", null, label); td.colSpan = 8; hr.appendChild(td); t.appendChild(hr);
+    const wrap = el("div", "sb-team " + TEAM[tn]);
+    const head = el("div", "sb-head");
+    head.innerHTML = `<span class="sb-side">${label}</span>` +
+      `<span class="sb-wins">${tn === 3 ? (sco.ct || 0) : (sco.t || 0)}</span>` +
+      `<span class="sb-cols"><i>K</i><i>D</i><i>A</i><i>+/-</i><i>HS%</i></span>`;
+    wrap.appendChild(head);
     for (const p of ps) {
-      const tr = el("tr", TEAM[tn]);
-      tr.innerHTML = `<td class="name clickable">${esc(p.name)}</td><td>${p.kills}</td><td>${p.deaths}</td><td>${p.assists}</td><td>${p.hs}%</td><td>${p.adr}</td><td>${p.kd}</td><td>${p.mvps}</td>`;
-      tr.querySelector(".name").onclick = () => { $("#coolSearch").value = p.name; renderHighlights(); };
-      t.appendChild(tr);
+      const k = p.kills || 0, d = p.deaths || 0;
+      const diff = k - d;
+      const hs = k ? Math.round(((p.headshots || 0) / k) * 100) : 0;
+      const row = el("div", "sb-row");
+      row.innerHTML =
+        `<span class="sb-name">${esc(p.name)}</span>` +
+        `<span class="sb-stat">${k}</span>` +
+        `<span class="sb-stat">${d}</span>` +
+        `<span class="sb-stat">${p.assists || 0}</span>` +
+        `<span class="sb-stat ${diff > 0 ? "pos" : diff < 0 ? "neg" : ""}">${diff > 0 ? "+" : ""}${diff}</span>` +
+        `<span class="sb-stat">${hs}%</span>`;
+      row.querySelector(".sb-name").onclick = () => { $("#coolSearch").value = p.name; renderHighlights(); };
+      wrap.appendChild(row);
     }
+    box.appendChild(wrap);
   }
-  box.appendChild(t);
+  if (!all.length) box.appendChild(el("div", "muted", "No scoreboard data for this demo."));
 }
 
 function stars(score) { const n = score >= 100 ? 5 : score >= 70 ? 4 : score >= 50 ? 3 : score >= 35 ? 2 : 1; return "★".repeat(n) + "☆".repeat(5 - n); }

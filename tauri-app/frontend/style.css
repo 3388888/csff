@@ -191,3 +191,40 @@ td.name.clickable { cursor: pointer; } td.name.clickable:hover { color: var(--ac
 .exp-prev { width:100%; aspect-ratio:16/9; background:#0a0d10; border:1px solid var(--line); border-radius:6px; display:block; }
 .exp-play { display:flex; align-items:center; gap:8px; margin:6px 0; }
 .exp-play input[type=range] { flex:1; }
+
+/* --- CS:GO-style scoreboard --- */
+.sb-team { margin-bottom: 14px; }
+.sb-head { display: grid; grid-template-columns: 1fr auto auto; align-items: center; gap: 10px;
+  padding: 5px 8px; border-radius: 5px 5px 0 0; font-weight: 700; }
+.sb-team.ct .sb-head { background: rgba(91,155,213,.18); border-bottom: 2px solid var(--ct); }
+.sb-team.t  .sb-head { background: rgba(224,165,59,.18); border-bottom: 2px solid var(--t); }
+.sb-side { letter-spacing: 1px; }
+.sb-team.ct .sb-side { color: var(--ct); } .sb-team.t .sb-side { color: var(--t); }
+.sb-wins { font-size: 18px; }
+.sb-cols { display: inline-grid; grid-template-columns: repeat(5, 38px); text-align: right; }
+.sb-cols i { font-style: normal; color: var(--muted); font-size: 11px; font-weight: 500; }
+.sb-row { display: grid; grid-template-columns: 1fr repeat(5, 38px); align-items: center;
+  padding: 4px 8px; border-bottom: 1px solid #1d232b; font-size: 12.5px; }
+.sb-row:hover { background: #1a1f26; }
+.sb-name { cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sb-name:hover { color: var(--accent); }
+.sb-stat { text-align: right; }
+.sb-stat.pos { color: var(--good); } .sb-stat.neg { color: var(--bad); }
+
+/* --- per-round kill timeline --- */
+.tl { display: flex; flex-direction: column; gap: 2px; overflow-x: auto; padding-bottom: 6px; }
+.tl-row { display: flex; gap: 2px; align-items: center; }
+.tl-name { width: 118px; min-width: 118px; font-size: 11.5px; cursor: pointer;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-right: 6px; }
+.tl-name:hover { color: var(--accent); }
+.tl-name.ct { color: var(--ct); } .tl-name.t { color: var(--t); }
+.tl-cell { width: 19px; min-width: 19px; height: 18px; border-radius: 3px; background: #141a21;
+  font-size: 10px; line-height: 18px; text-align: center; color: var(--text); }
+.tl-hdr .tl-cell { background: transparent; color: var(--muted); height: 14px; line-height: 14px; }
+.tl-hdr .tl-cell.win-ct { border-bottom: 2px solid var(--ct); }
+.tl-hdr .tl-cell.win-t  { border-bottom: 2px solid var(--t); }
+.tl-cell.k1 { background: rgba(106,196,122,.28); }
+.tl-cell.k2 { background: rgba(217,164,65,.40); }
+.tl-cell.k3 { background: rgba(224,140,60,.55); }
+.tl-cell.k4 { background: rgba(224,96,94,.65); }
+.tl-cell.k5 { background: rgba(224,96,94,.9); font-weight: 700; }
