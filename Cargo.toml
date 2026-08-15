@@ -1,3 +1,4 @@
+# csff — Cargo workspace: the demo engine (native/csgo-rs) and the desktop app.
 # Workspace root. The point of splitting these out is that the CORE scanner (demo parsing +
 # classify) must be buildable and shippable on its own — everything heavier (game-asset
 # extraction, 3D export, the desktop UI) is an opt-in layer on top of it.
