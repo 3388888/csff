@@ -146,7 +146,7 @@ pub struct Movement {
     tprev: HashMap<i32, TrickPrev>,
     surf: HashMap<i32, SurfState>,
     pixel: HashMap<i32, PixelState>,
-    fb_prev: HashMap<i32, i32>,
+    fb_prev: HashMap<i32, (i32, i32)>, // slot -> (prev speed, prev vertical velocity)
     flashes: Vec<FlashEv>,
     tel: HashMap<i32, Vec<Tel>>,
     pub runs_out: Vec<MRun>,
@@ -495,12 +495,26 @@ impl Movement {
 
     // flashboost: sudden speed spike right after a flash detonates within 320u
     fn track_flashboost(&mut self, slot: i32, s: Sample, ct: i32) {
-        let pv = self.fb_prev.insert(slot, s.spd);
-        let pv = match pv {
+        // A flashboost is the grenade's blast PROPELLING the player: a flash that merely pops
+        // nearby must not qualify. So we require a real change in motion in the instant after
+        // the detonation — either a big horizontal speed gain OR being launched upward.
+        // Vertical was previously ignored entirely, which missed most boosts (they throw you
+        // UP more than along) while letting ordinary flashes through on small speed jitter.
+        let prev = self.fb_prev.insert(slot, (s.spd, s.vz));
+        let (pv_spd, pv_vz) = match prev {
             Some(v) => v,
             None => return,
         };
-        if s.spd - pv < 180 || s.spd < 300 {
+        let gain_spd = s.spd - pv_spd;
+        let gain_vz = s.vz - pv_vz;
+        let boosted_fast = gain_spd >= 180 && s.spd >= 300;      // flung along the ground
+        let boosted_up = gain_vz >= 220 && s.vz >= 150;          // launched off the ground
+        if !boosted_fast && !boosted_up {
+            return;
+        }
+        // the blast has to have left them airborne — a boost you never leave the floor for
+        // isn't a boost
+        if s.on_ground {
             return;
         }
         let win = (self.tickrate as f32 * 0.4) as i32;
@@ -523,8 +537,8 @@ impl Movement {
                 slot,
                 tick: ct,
                 kind: "flashboost",
-                fall_vel: s.spd,
-                spd: s.spd - pv,
+                fall_vel: s.spd.max(s.vz),
+                spd: gain_spd.max(gain_vz),
                 dur_ticks: 0,
                 dist: 0,
                 x: 0.0,

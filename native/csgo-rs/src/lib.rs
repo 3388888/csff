@@ -208,6 +208,7 @@ struct Parser {
     movement: Option<movement::Movement>,
     full: bool, // decode positions + movement (slow); off = frags only (fast)
     map_name: String,
+    server_name: String,
     playback_ticks: i32,
     playback_time: f32,
 }
@@ -242,6 +243,7 @@ impl Parser {
             movement: None,
             full,
             map_name: String::new(),
+            server_name: String::new(),
             playback_ticks: 0,
             playback_time: 0.0,
         }
@@ -264,6 +266,12 @@ impl Parser {
             let raw = &data[536..796];
             let end = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
             String::from_utf8_lossy(&raw[..end]).to_string()
+        };
+        // HL2DEMO header: server name at 16, client/"GOTV Demo" at 276 (both 260-byte fields)
+        self.server_name = {
+            let raw = &data[16..276];
+            let end = raw.iter().position(|&c| c == 0).unwrap_or(raw.len());
+            String::from_utf8_lossy(&raw[..end]).trim().to_string()
         };
         self.step = ((tr as f32 / 20.0).round() as i32).max(1);
         if self.full {
@@ -1960,9 +1968,53 @@ pub fn classify_demo_json(path: &str, ini_text: Option<&str>) -> Option<String> 
         let sb = b["coolScore"].as_i64().unwrap_or(0);
         sb.cmp(&sa).then(a["watchTick"].as_i64().unwrap_or(0).cmp(&b["watchTick"].as_i64().unwrap_or(0)))
     });
+    // The single-demo view renders a scoreboard, header and round strip — none of which were
+    // emitted here, so opening one demo threw on `current.players.filter`. Derive them from
+    // the kills (the demo never states round winners, so infer from each round's last kill).
+    let mut stats: HashMap<i64, (i32, i32, i32, i32)> = HashMap::new(); // uid -> (k,d,hs,team)
+    let mut last_by_round: HashMap<i32, i32> = HashMap::new();
+    for k in &p.kills {
+        let e = stats.entry(k.attacker).or_insert((0, 0, 0, k.attacker_team));
+        e.0 += 1;
+        if k.headshot {
+            e.2 += 1;
+        }
+        if e.3 == 0 {
+            e.3 = k.attacker_team;
+        }
+        stats.entry(k.victim).or_insert((0, 0, 0, 0)).1 += 1;
+        if k.attacker_team != 0 {
+            last_by_round.insert(k.round, k.attacker_team);
+        }
+    }
+    let name_of = |uid: i64| p.names.get(&uid).cloned().unwrap_or_else(|| format!("uid{uid}"));
+    let sid_of = |uid: i64| match p.xuids.get(&uid) {
+        Some(x) => x.to_string(),
+        None => format!("uid{uid}"),
+    };
+    let mut players: Vec<serde_json::Value> = stats
+        .iter()
+        .map(|(&uid, &(k, d, hs, team))| json!({
+            "name": name_of(uid), "steamId": sid_of(uid), "uid": uid, "team": team,
+            "kills": k, "deaths": d, "assists": 0, "headshots": hs, "damage": 0, "mvps": 0,
+        }))
+        .collect();
+    players.sort_by(|a, b| b["kills"].as_i64().cmp(&a["kills"].as_i64()));
+    let rounds = p.round_ticks.len().max(1);
+    let ct_wins = last_by_round.values().filter(|&&t| t == 3).count();
+    let t_wins = last_by_round.values().filter(|&&t| t == 2).count();
+    let winners: Vec<i32> = (0..rounds as i32)
+        .map(|r| last_by_round.get(&r).copied().unwrap_or(0))
+        .collect();
     serde_json::to_string(&json!({
         "mapName": p.map_name, "tickrate": tr, "highlights": out,
-        "score": { "rounds": p.round_ticks.len().max(1) },
+        "score": { "rounds": rounds, "ct": ct_wins, "t": t_wins },
+        "players": players,
+        "roundWinners": winners,
+        "header": {
+            "mapName": p.map_name, "serverName": p.server_name,
+            "playbackTicks": p.playback_ticks, "playbackTime": p.playback_time,
+        },
     })).ok()
 }
 

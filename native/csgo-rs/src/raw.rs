@@ -357,11 +357,23 @@ fn build(p: &Parser) -> RawOut {
 
     let mut header = HashMap::new();
     header.insert("mapName".into(), serde_json::json!(p.map_name));
+    // the match view renders header.serverName; without it the whole view threw
+    header.insert("serverName".into(), serde_json::json!(p.server_name));
     header.insert("playbackTicks".into(), serde_json::json!(p.playback_ticks));
     header.insert("playbackTime".into(), serde_json::json!(p.playback_time));
     let mut score = HashMap::new();
-    score.insert("ct".into(), 0);
-    score.insert("t".into(), 0);
+    // The demo never states who won a round, so infer it from the LAST kill of each round —
+    // whoever got it is almost always on the winning side. Wrong for defuse/time wins, but far
+    // better than the zeros this used to report (which rendered as "CT undefined : undefined T").
+    let mut last_by_round: HashMap<i32, i32> = HashMap::new();
+    for k in &p.kills {
+        let t = if k.attacker_team != 0 { k.attacker_team } else { team_of(k.attacker) };
+        last_by_round.insert(k.round, t);
+    }
+    let ct_wins = last_by_round.values().filter(|&&t| t == 3).count() as i32;
+    let t_wins = last_by_round.values().filter(|&&t| t == 2).count() as i32;
+    score.insert("ct".into(), ct_wins);
+    score.insert("t".into(), t_wins);
     score.insert("rounds".into(), rounds);
     let mut roster = HashMap::new();
     for (&uid, team) in &roster_team {
@@ -378,7 +390,7 @@ fn build(p: &Parser) -> RawOut {
         preview_step: p.step,
         score,
         players,
-        round_winners: vec![0; rounds as usize],
+        round_winners: (0..rounds).map(|r| last_by_round.get(&r).copied().unwrap_or(0)).collect(),
         kills,
         movement_runs: runs,
         tricks,

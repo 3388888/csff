@@ -763,3 +763,96 @@ pub fn map_light(path: &str) -> Option<([f32; 3], f32, [f32; 3], [f32; 3])> {
     }
     None
 }
+
+/// Append static-prop geometry to a CCG1 blob so the in-app 3D preview shows the rails,
+/// crates and clutter that make a map readable. `load` resolves a model path to its triangle
+/// list (the caller owns VPK access, so bspgeo stays free of asset-pipeline dependencies).
+///
+/// CCG1 layout: [64-byte header][int16 xyz*3 per tri][1 material byte per tri]. Props are
+/// appended to both arrays and triCount is bumped, so existing readers need no changes.
+#[allow(clippy::type_complexity)]
+pub fn append_props(
+    blob: &[u8],
+    bsp_path: &str,
+    mut load: impl FnMut(&str) -> Option<Vec<[f32; 3]>>,
+    max_tris: usize,
+) -> Vec<u8> {
+    const HDR: usize = 64;
+    if blob.len() < HDR + 8 {
+        return blob.to_vec();
+    }
+    let n0 = u32::from_le_bytes(blob[4..8].try_into().unwrap()) as usize;
+    let pos_end = HDR + n0 * 18;
+    if pos_end + n0 > blob.len() {
+        return blob.to_vec();
+    }
+    let props = map_props(bsp_path);
+    if props.is_empty() {
+        return blob.to_vec();
+    }
+    // group by model so each mesh is loaded once, most-used first
+    let mut by_model: std::collections::HashMap<&str, Vec<&PropInst>> = std::collections::HashMap::new();
+    for p in &props {
+        by_model.entry(p.model.as_str()).or_default().push(p);
+    }
+    let mut groups: Vec<(&str, Vec<&PropInst>)> = by_model.into_iter().collect();
+    groups.sort_by_key(|(_, v)| std::cmp::Reverse(v.len()));
+
+    let mut new_pos: Vec<i16> = Vec::new();
+    let mut new_mat: Vec<u8> = Vec::new();
+    let mut budget = max_tris;
+    let q = |v: f32| -> i16 { v.round().clamp(-32768.0, 32767.0) as i16 };
+    for (model, insts) in groups {
+        if budget == 0 {
+            break;
+        }
+        let Some(tris) = load(model) else { continue };
+        let per = tris.len() / 3;
+        if per == 0 || per * insts.len() > budget {
+            continue;
+        }
+        budget -= per * insts.len();
+        for inst in insts {
+            let (p_, y_, r_) = (
+                inst.angles[0].to_radians(),
+                inst.angles[1].to_radians(),
+                inst.angles[2].to_radians(),
+            );
+            let (sp, cp) = p_.sin_cos();
+            let (sy, cy) = y_.sin_cos();
+            let (sr, cr) = r_.sin_cos();
+            let m = [
+                [cp * cy, sr * sp * cy - cr * sy, cr * sp * cy + sr * sy],
+                [cp * sy, sr * sp * sy + cr * cy, cr * sp * sy - sr * cy],
+                [-sp, sr * cp, cr * cp],
+            ];
+            for t in &tris {
+                let w = [
+                    m[0][0] * t[0] + m[0][1] * t[1] + m[0][2] * t[2] + inst.origin[0],
+                    m[1][0] * t[0] + m[1][1] * t[1] + m[1][2] * t[2] + inst.origin[1],
+                    m[2][0] * t[0] + m[2][1] * t[1] + m[2][2] * t[2] + inst.origin[2],
+                ];
+                new_pos.push(q(w[0]));
+                new_pos.push(q(w[1]));
+                new_pos.push(q(w[2]));
+            }
+            for _ in 0..per {
+                new_mat.push(3); // "prop" material slot
+            }
+        }
+    }
+    if new_mat.is_empty() {
+        return blob.to_vec();
+    }
+    let total = n0 + new_mat.len();
+    let mut out = Vec::with_capacity(blob.len() + new_pos.len() * 2 + new_mat.len());
+    out.extend_from_slice(&blob[..HDR]);
+    out[4..8].copy_from_slice(&(total as u32).to_le_bytes());
+    out.extend_from_slice(&blob[HDR..pos_end]);          // original positions
+    for v in &new_pos {
+        out.extend_from_slice(&v.to_le_bytes());          // prop positions
+    }
+    out.extend_from_slice(&blob[pos_end..pos_end + n0]);  // original materials
+    out.extend_from_slice(&new_mat);                      // prop materials
+    out
+}
