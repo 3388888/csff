@@ -29,3 +29,6 @@ Thumbs.db
 desktop.ini
 .DS_Store
 *.swp
+
+# Built binaries belong in GitHub Releases, not in git history
+release/
