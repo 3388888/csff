@@ -1,162 +1,114 @@
-# CSGO Demo Highlights
+# csff — CS demo highlight finder
 
 Point it at a folder of demos. It finds the best moments across all of them — aces, clutches,
-noscopes, flicks, wallbangs, pixelsurfs, movement — ranks them by how hard they actually were,
-and lets you watch each one in a built-in 2D/3D preview or jump the real game straight to it.
+noscopes, flicks, wallbangs, jumpshots, pixelsurfs, bhop runs, edgebugs — ranks them by how hard
+they actually were, and lets you watch each one in a built-in 2D/3D preview, jump the real game
+straight to the tick, export a demopack, or port the clip into Blender / Unreal.
 
-Works on **CS:GO / Source 1 (`HL2DEMO`) demos**. CS:S demos are supported for frag detection.
+Everything is Rust. No Node, no Electron, no external parser.
 
-Comes in two flavours:
-
-- **Console edition** — one tiny `.exe`, runs entirely in the terminal (like `cssff`). Scan a
-  folder, get a ranked list, jump the game to any clip. Zero install. Optional radar/3D previews
-  are add-ons you download from its menu. Best if you just want the list fast.
-- **Desktop app** — the full GUI with the 2D radar and 3D map previews built in.
-
----
-
-## Console edition (`CSGO-Highlights-Console.exe`)
-
-Download the single exe from [Releases](https://github.com/3388888/cc-demo-highlights/releases)
-and run it — nothing to install.
-
-```text
-CSGO-Highlights-Console.exe  "D:\path\to\your\demos"
-```
-
-(or just double-click it and paste the folder when it asks). It scans, prints the top highlights
-ranked by score, and gives you a menu:
-
-- **type a number** → writes a `.vdm` next to that demo and launches CS to the clip (paused; press **P**), or prints the `playdemo` console command if you haven't set your game exe.
-- **d** → download optional add-ons (radar images for a 2D preview, stripped `.bsp` geometry for 3D).
-- **q** → quit.
-
-The core (scan + rank + list + jump-to-clip) needs **no downloads** — the previews are the only add-ons.
-
-Build it yourself: run **`build-console.cmd`** (compiles it, and if you drop
-[`upx.exe`](https://github.com/upx/upx/releases) next to the script it shrinks the exe from
-~14 MB to ~3.5 MB). Or plain: `cd native/cli && go build -ldflags="-s -w" -trimpath -o ../../CSGO-Highlights-Console.exe .`
+| Game | Support |
+| --- | --- |
+| CS:GO (Source 1, `HL2DEMO`) | full — kills, telemetry, positions, movement tricks |
+| CS:S / TF2 (Orange Box) | frags, player names, SteamID64 |
+| CS2 (`PBDEMS2`) | opt-in build feature |
 
 ---
 
-## Desktop app — install (easy way — no build tools)
+## Install
 
-1. Download **`install.cmd`** from this repo (green **Code** button, or open the file and hit **Raw** → save).
-2. Double-click it.
+Grab the installer from [Releases](https://github.com/3388888/csff/releases) and run it, or use
+the portable `.exe` if you'd rather not install anything.
 
-It downloads the latest release, unpacks it to `%LOCALAPPDATA%\CSGO Demo Highlights`, and drops a
-desktop shortcut. No installer UI, nothing to click through. Re-run it any time to update.
+On first run, open **⚙ Settings** and set:
 
-> Prefer a normal installer? Grab **`CSGO Demo Highlights Setup.exe`** from
-> [Releases](https://github.com/3388888/cc-demo-highlights/releases) instead.
-
----
-
-## Using it
-
-1. **Settings** (gear) → set your **demos folder** and your **CS:GO/CS2 exe** (and CS:S exe if you have those demos).
-2. **Scan folder** → **Best of folder** builds the ranked list. The first scan decodes every
-   demo (using your spare CPU); after that it's cached, so reopening is fast and only new demos get read.
-3. Click a card:
-   - **Preview** — watch it in the built-in 2D radar or 3D map view.
-   - **Open in CS:GO** — launches the game (or jumps the already-running one), skips to the clip,
-     follows the player, and **pauses** so the skip settles. Press **P** to play/pause.
-4. **Star** clips (☆) to build a favorites list / demopack.
-
-**Filters** (top bar): map, weapon, kill-type, min distance, favorites, and sort
-(best / newest / oldest / longest / shortest clip). Dates come from the demo filename. Selecting a
-**kill-type** kicks off a deeper background pass to surface more of exactly that category.
+- **Demos folder** — where your `.dem` / `.dem.bz2` files live
+- **Maps folder** *(optional)* — a `csgo/maps` directory, enables the 3D preview
+- **Game content folder** *(optional)* — e.g. `…/csgo` or `…/cstrike`, enables real player
+  models, weapons and textures in the 3D export
 
 ---
 
-## What it finds
+## What's in the repo
 
-- **Multikills & clutches** — aces / quads / triples and 1vX clutches, with a round-by-round scoreboard.
-- **Aim** — noscopes (scoped vs no-scope, distance-gated), jumpshots, flicks, spins/360s, wallbangs,
-  smoke / flashed kills, airshots, long-range.
-- **Pixelsurf** — a kill made while perched on a sliver of geometry too small to count as ground,
-  vetted against the map's ladder/water brushes so ladders don't count as false positives.
-- **Movement** — bhop runs, surf / wall-glide, edgebug / jumpbug, and flashboost (a flash
-  detonating next to a teammate → velocity spike), all read from telemetry.
-- **Troll kills** — knife / grenade / zeus (off by default).
+GitHub's file list shows each file's *last commit message*, not what it does — so here's the map.
 
-Everything is scored with a **difficulty multiplier**: long, airborne, fast, low-hit-chance kills
-rise; close-range spray-downs and **warmup / DM** rounds are pushed down or excluded. All the
-thresholds (cssff-style frag rules) are editable in Settings.
+### Top level
 
-## Previews
+| Path | What it is |
+| --- | --- |
+| `native/csgo-rs/` | **The engine.** Demo parsing, highlight scoring, asset extraction, 3D export. Builds standalone as a CLI. |
+| `tauri-app/` | **The desktop app.** Rust backend (`src-tauri/`) + the HTML/JS UI (`frontend/`). |
+| `maps/` | Radar images (WebP) and `maps.json` — per-map calibration used to place players on the 2D radar. |
+| `assets/` | Weapon and modifier icons (SVG) drawn in the killfeed and on highlight cards. |
+| `vendor/cssff/` | `cssff_settings.ini` — the rulebook that decides what counts as a highlight. Editable in Settings. |
+| `release/` | Built artifacts to attach to a GitHub Release. |
+| `Cargo.toml` | Cargo **workspace** root — ties the engine and the app together. |
 
-- **2D** — the real map radar with aim cone, killfeed, utility (smokes / mollies / flashes / HE),
-  and height cues (demos are 2D, so elevation shows as sticks + `↓150u` labels).
-- **3D** — the actual map: brush + displacement geometry stripped straight from the `.bsp`
-  (no game files copied), chase / POV / orbit / top cameras, tracers, and a roof cutaway to see
-  inside buildings. The camera avoids clipping into walls. Player models are built at runtime (zero asset size).
+### The engine — `native/csgo-rs/src/`
 
-## Performance
+| File | What it does |
+| --- | --- |
+| `lib.rs` | Demo container reader (CS:GO protobuf net messages), string tables, game events, and the public API. |
+| `css.rs` | CS:S / TF2 parser — Orange Box bit-packed messages, auto-tuned per engine branch. |
+| `entity.rs` | Entity/prop decoding — player positions, angles, velocity, team, alive state. |
+| `sendtables.rs` | Network schema (`dem_datatables`) → flattened property tables for entity decode. |
+| `movement.rs` | Per-tick movement tracking: bhop runs, surf, edgebug, jumpbug, pixelsurf, flashboost. |
+| `classify.rs` | Turns kills and movement into ranked highlights with tags and difficulty scores. |
+| `cssff.rs` | Reads `cssff_settings.ini` so the scoring thresholds are yours, not hardcoded. |
+| `raw.rs` | Emits the full match JSON the UI consumes. |
+| `bspgeo.rs` | Strips geometry, displacements, static props and lighting out of a `.bsp`. |
+| `vpk.rs` | Reads Valve Pak archives — how every game asset is retrieved. |
+| `mdl.rs` | Model geometry: `.mdl` + `.vvd` + `.vtx` → a mesh. |
+| `vtf.rs` | Valve textures (DXT1/3/5) → PNG. |
+| `vmt.rs` | Materials — maps a model's material name to its actual texture. |
+| `export.rs` | Writes glTF (`.glb`) for Blender / Unreal: player motion, kill markers, map, props. |
+| `pb.rs` | Minimal protobuf + bit reader. No codegen, no dependencies. |
+| `cs2.rs` | CS2 demos, behind the `cs2` feature. |
 
-- Scans in parallel, sizing the worker pool to your **actually-free CPU** and backing off when the
-  machine is busy — so a big folder doesn't lock you up.
-- **Decode-once**: results persist. Changing scoring or filters re-ranks from cache in seconds and
-  never re-decodes demos it has already read.
+### The app — `tauri-app/`
 
-## CS:S notes
-
-CS:S demos (`cstrike`) are decoded by the bundled `cssfast` (native) with `cssff` as a fallback.
-**Frag detection works across engine versions** (protocol 7/8, the v77 era, and v93/v94). The
-2D/3D **position preview for CS:S is experimental and protocol-dependent** — some demos produce
-frags only (no radar/3D playback). Old map versions borrow the closest radar/geometry available
-(`de_tuscan` → `de_toscan`) and say so.
+| File | What it does |
+| --- | --- |
+| `src-tauri/src/main.rs` | Every command the UI calls: scanning, caching, favourites, launching the game, exports. |
+| `frontend/app.js` | The UI — highlight cards, filters, scoreboard, round timeline, settings. |
+| `frontend/preview3d.js` | The 3D map preview (WebGL). |
+| `frontend/classify.js` | Legacy JS scoring, kept as a reference implementation. |
+| `frontend/weapons.js` | Maps weapon names to killfeed icons. |
+| `frontend/style.css` | Styling. |
 
 ---
 
-## Build from source
+## Building
 
-Requires **Node 18+** (and **Go 1.21+** only if you change the native decoders).
+Needs a Rust toolchain. On Windows this project uses the **GNU** target.
 
 ```bash
-git clone https://github.com/3388888/cc-demo-highlights
-cd cc-demo-highlights
-npm install
-npm start            # run in dev
+# the app (installer lands in target/release/bundle/)
+cd tauri-app/src-tauri && cargo tauri build
+
+# the engine on its own
+cargo build --release -p csgo-rs --features full
 ```
 
-Rebuild the native decoders (optional — prebuilt `.exe`s are committed, so this isn't needed to run):
+### Build features
 
-```bash
-cd native/csgofast && go build -o csgofast.exe .
-cd ../cssfast       && go build -o cssfast.exe .
-```
+The engine is modular — the core is just parsing and scoring, everything heavier is opt-in.
 
-Package for distribution:
+| Feature | Adds |
+| --- | --- |
+| *(default)* | Demo parsing + highlight classification |
+| `bsp` | Map geometry, displacements, static props, lighting |
+| `assets` | VPK / MDL / VTF / VMT extraction |
+| `export3d` | glTF export (implies `bsp` + `assets`) |
+| `cs2` | CS2 demo support |
+| `full` | All of the above |
 
-```bash
-npm run dist         # NSIS installer + win-unpacked -> dist/
-package.cmd          # zip the portable build for a GitHub release (what install.cmd downloads)
-```
+Core builds to ~0.48 MB; `full` to ~0.62 MB.
 
-## Layout
+---
 
-| Path | What |
-|---|---|
-| `main.js` / `preload.js` | Electron main process + IPC bridge |
-| `renderer/` | UI, 2D radar, WebGL 3D preview |
-| `parser.js` | classify engine (kills → ranked highlights) |
-| `parse-worker.js` | pooled decode/classify worker |
-| `native/csgofast/` | Go CS:GO decoder (demoinfocs) |
-| `native/cssfast/` | Go CS:S / Source-1 decoder |
-| `bspgeo.js` · `pixelsurf.js` · `mapfiles.js` | `.bsp` geometry + ladder/water brush extraction |
-| `vdm.js` | writes the `.vdm` that drives in-game playback |
+## Credit
 
-Caches live in `%APPDATA%\CSGO Demo Highlights\` (`cache/`, `aggregate_v2.json.gz`, `favorites.json`, `settings.json`).
-
-## Acknowledgements
-
-- **cssff** — the CS:S demo frag-finder bundled in `vendor/cssff/`. All CS:S frag detection
-  builds on it and follows its rulebook (`cssff_settings.ini`). Full credit to its original
-  author; it's redistributed here as-is for convenience.
-- **[demoinfocs-golang](https://github.com/markus-wa/demoinfocs-golang)** by Markus Walther —
-  the CS:GO / CS2 demo decoder both the desktop app and the console edition use.
-
-## License
-
-MIT (this project's own code). Bundled third-party tools keep their own terms.
+Highlight thresholds follow [cssff](https://github.com/kkthxbye-code/cssff)'s frag model, and
+`cssff_settings.ini` is compatible with it.
